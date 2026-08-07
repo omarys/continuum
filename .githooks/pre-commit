@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+set -e
+
+echo "==> [pre-commit] Checking and updating crates..."
+
+# Run cargo update to ensure dependencies are up-to-date
+if command -v rtk >/dev/null 2>&1; then
+    rtk cargo update || cargo update
+else
+    cargo update
+fi
+
+# If Cargo.lock was updated by cargo update, stage it automatically
+if git status --porcelain | grep -q "Cargo.lock"; then
+    echo "==> [pre-commit] Staging updated Cargo.lock..."
+    git add Cargo.lock
+fi
+
+# Run cargo clippy check
+echo "==> [pre-commit] Verifying clippy checks..."
+if command -v rtk >/dev/null 2>&1; then
+    rtk cargo clippy -- -D warnings || cargo clippy -- -D warnings
+else
+    cargo clippy -- -D warnings
+fi
+
+echo "==> [pre-commit] All checks passed successfully."

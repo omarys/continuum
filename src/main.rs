@@ -75,10 +75,15 @@ fn load_custom_styles() {
         }
 
         .chapter-banner {
-            background-color: #181818;
-            border-top: 1px solid #2a2a2a;
-            border-bottom: 1px solid #2a2a2a;
+            background-color: #161616;
             padding: 16px 0;
+        }
+
+        .chapter-line {
+            background-color: #3b3b4f;
+            min-height: 2px;
+            margin: 12px 0;
+            opacity: 0.8;
         }
 
         .accent-card {
@@ -90,6 +95,19 @@ fn load_custom_styles() {
 
         scrolledwindow {
             background-color: #121212;
+        }
+
+        .manga-page {
+            margin: 0 16px;
+            border-left: 2px solid #2e2e42;
+            border-right: 2px solid #2e2e42;
+            border-radius: 6px;
+            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.7);
+        }
+
+        .manga-fade-overlay {
+            mask-image: linear-gradient(to right, transparent 0%, black 14%, black 86%, transparent 100%);
+            -webkit-mask-image: linear-gradient(to right, transparent 0%, black 14%, black 86%, transparent 100%);
         }
     "#;
 

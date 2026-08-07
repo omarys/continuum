@@ -1,9 +1,15 @@
-use gtk4::prelude::*;
-use gtk4::{Box as GtkBox, Label, Orientation, Picture, Spinner, ContentFit, Align};
-use gdk4::Texture;
-use std::rc::Rc;
-use std::cell::RefCell;
 use crate::cache::PageKey;
+use gdk4::Texture;
+use gtk4::prelude::*;
+use gtk4::{Align, Box as GtkBox, ContentFit, Label, Orientation, Picture, Spinner};
+use std::cell::RefCell;
+use std::rc::Rc;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReadingMode {
+    ContinuousVertical,
+    ContinuousHorizontal,
+}
 
 #[allow(dead_code)]
 #[derive(Clone)]
@@ -17,6 +23,8 @@ pub struct PageWidget {
     pub is_loaded: Rc<RefCell<bool>>,
     pub is_loading: Rc<RefCell<bool>>,
     pub expected_height: i32,
+    pub orig_width: u32,
+    pub orig_height: u32,
 }
 
 impl PageWidget {
@@ -35,7 +43,7 @@ impl PageWidget {
 
         let picture = Picture::builder()
             .content_fit(ContentFit::Contain)
-            .can_shrink(false)
+            .can_shrink(true)
             .visible(false)
             .build();
 
@@ -70,6 +78,45 @@ impl PageWidget {
             is_loaded: Rc::new(RefCell::new(false)),
             is_loading: Rc::new(RefCell::new(false)),
             expected_height: calc_height,
+            orig_width: width,
+            orig_height: height,
+        }
+    }
+
+    pub fn update_layout_for_mode(&self, mode: ReadingMode) {
+        match mode {
+            ReadingMode::ContinuousVertical => {
+                self.container.remove_css_class("manga-page");
+                self.container.set_vexpand(false);
+                self.picture.set_vexpand(false);
+                self.container.set_width_request(-1);
+                if !*self.is_loaded.borrow() {
+                    self.container.set_height_request(self.expected_height);
+                    self.placeholder.set_height_request(self.expected_height);
+                } else {
+                    self.container.set_height_request(-1);
+                }
+            }
+            ReadingMode::ContinuousHorizontal => {
+                self.container.add_css_class("manga-page");
+                self.container.set_vexpand(true);
+                self.container.set_valign(Align::Fill);
+                self.picture.set_can_shrink(true);
+                self.picture.set_content_fit(ContentFit::Contain);
+                self.picture.set_vexpand(true);
+                self.picture.set_valign(Align::Fill);
+
+                let calc_width = if self.orig_width > 0 && self.orig_height > 0 {
+                    let aspect = self.orig_height as f64 / self.orig_width as f64;
+                    ((820.0 / aspect) as i32).clamp(320, 1000)
+                } else {
+                    600
+                };
+                self.container.set_width_request(calc_width);
+                self.container.set_height_request(-1);
+                self.placeholder.set_width_request(calc_width);
+                self.placeholder.set_height_request(-1);
+            }
         }
     }
 
@@ -79,8 +126,6 @@ impl PageWidget {
         }
 
         self.picture.set_paintable(Some(texture));
-        self.container.set_height_request(-1);
-        self.picture.set_height_request(-1);
 
         self.placeholder.set_visible(false);
         self.picture.set_visible(true);
@@ -93,8 +138,7 @@ impl PageWidget {
     pub fn set_unloaded(&self) {
         self.picture.set_paintable(None::<&gdk4::Texture>);
         self.picture.set_visible(false);
-        self.container.set_height_request(self.expected_height);
-        self.placeholder.set_height_request(self.expected_height);
+
         self.placeholder.set_visible(true);
         self.spinner.set_spinning(false);
 

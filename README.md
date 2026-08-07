@@ -2,7 +2,7 @@
 
 **Continuum** is a high-performance, minimal comic reader written in Rust, specifically optimized for vertical continuous scrolling of **Manhwa** and **Webtoons** stored in `.cbz` / `.zip` archives.
 
-> ⚡ **100% Vibe-Coded with Gemini 3.6 Flash**  
+> ⚡ **100% Vibe-Coded with Gemini 3.6 Flash**
 > This entire codebase was **100% vibe-coded** using **Gemini 3.6 Flash** via Google Antigravity—from native GTK4/Adwaita layout design and `zip` archive extraction to multi-threaded memory caching and zero-layout-shift scrolling.
 
 ---

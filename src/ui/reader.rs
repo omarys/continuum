@@ -13,7 +13,7 @@ use crossbeam_channel::{unbounded, Receiver, Sender};
 use crate::cache::{MemoryManager, PageKey};
 use crate::cbz::{CbzArchive, DecodedImagePayload, DirectorySeries};
 use crate::ui::chapter_banner::create_chapter_banner;
-use crate::ui::page_widget::PageWidget;
+use crate::ui::page_widget::{PageWidget, ReadingMode};
 
 pub type OpenFileCallback = Rc<RefCell<Option<Box<dyn Fn()>>>>;
 
@@ -26,6 +26,7 @@ pub struct ChapterState {
 }
 
 #[allow(dead_code)]
+#[derive(Clone)]
 pub struct ReaderView {
     pub container: GtkBox,
     pub clamp: Clamp,
@@ -45,7 +46,9 @@ pub struct ReaderView {
     pub last_vadj_value: Rc<RefCell<f64>>,
     pub in_flight: Rc<RefCell<HashSet<PageKey>>>,
     pub target_y: Rc<RefCell<Option<f64>>>,
+    pub target_x: Rc<RefCell<Option<f64>>>,
     pub is_animating: Rc<RefCell<bool>>,
+    pub reading_mode: Rc<RefCell<ReadingMode>>,
 
     // Channels
     pub tx: Sender<(PageKey, Option<DecodedImagePayload>)>,
@@ -111,7 +114,9 @@ impl ReaderView {
         let last_vadj_value = Rc::new(RefCell::new(0.0));
         let in_flight = Rc::new(RefCell::new(HashSet::new()));
         let target_y = Rc::new(RefCell::new(None));
+        let target_x = Rc::new(RefCell::new(None));
         let is_animating = Rc::new(RefCell::new(false));
+        let reading_mode = Rc::new(RefCell::new(ReadingMode::ContinuousVertical));
         let open_file_callback: OpenFileCallback = Rc::new(RefCell::new(None));
 
         let (tx, rx) = unbounded::<(PageKey, Option<DecodedImagePayload>)>();
@@ -147,7 +152,9 @@ impl ReaderView {
             last_vadj_value,
             in_flight,
             target_y,
+            target_x,
             is_animating,
+            reading_mode,
             tx,
             rx,
             open_file_callback,
@@ -248,7 +255,9 @@ impl ReaderView {
             });
         }
 
-        self.global_to_key.borrow_mut().splice(0..0, new_keys.clone());
+        self.global_to_key
+            .borrow_mut()
+            .splice(0..0, new_keys.clone());
 
         let mut prepended_h = 100.0;
         for page_idx in (0..total_pages).rev() {
@@ -301,11 +310,82 @@ impl ReaderView {
         let in_flight = self.in_flight.clone();
         let tx = self.tx.clone();
 
-        let velocity = std::cell::Cell::<f64>::new(0.0);
+        let is_jumping_to_bottom = dest_y >= max_scroll - 10.0;
 
         self.scrolled_window.add_tick_callback(move |_, _| {
             let cur = vadj.value();
-            let tgt = match *target_y.borrow() {
+            let mut tgt = match *target_y.borrow() {
+                Some(t) => t,
+                None => {
+                    *is_animating.borrow_mut() = false;
+                    return glib::ControlFlow::Break;
+                }
+            };
+
+            let upr = vadj.upper();
+            let psz = vadj.page_size();
+            let total_global = global_to_key.borrow().len();
+
+            // Continuously request image decodes for live viewport on EVERY VSYNC frame
+            if total_global > 0 {
+                let current_global_idx = if cur <= 10.0 || upr <= psz {
+                    0
+                } else {
+                    let max_s = (upr - psz).max(1.0);
+                    let prog = (cur / max_s).clamp(0.0, 1.0);
+                    ((prog * (total_global as f64)) as usize).min(total_global.saturating_sub(1))
+                };
+                Self::dispatch_requests_around(
+                    current_global_idx,
+                    &global_to_key,
+                    &page_widgets,
+                    &chapters,
+                    &in_flight,
+                    &tx,
+                );
+            }
+
+            // If jumping to bottom (G), dynamically track layout upper updates
+            if is_jumping_to_bottom {
+                tgt = (upr - psz).max(0.0);
+                *target_y.borrow_mut() = Some(tgt);
+            }
+
+            let diff = tgt - cur;
+            if diff.abs() < 0.25 {
+                vadj.set_value(tgt);
+                *target_y.borrow_mut() = None;
+                *is_animating.borrow_mut() = false;
+                return glib::ControlFlow::Break;
+            }
+
+            let step = diff * 0.26;
+            let next = cur + step;
+            vadj.set_value(next);
+            glib::ControlFlow::Continue
+        });
+    }
+
+    pub fn smooth_scroll_to_x(&self, dest_x: f64) {
+        let hadj = self.scrolled_window.hadjustment();
+        let max_scroll = (hadj.upper() - hadj.page_size()).max(0.0);
+        let target = dest_x.clamp(0.0, max_scroll);
+
+        *self.target_x.borrow_mut() = Some(target);
+
+        if *self.is_animating.borrow() {
+            return;
+        }
+
+        *self.is_animating.borrow_mut() = true;
+
+        let target_x = self.target_x.clone();
+        let is_animating = self.is_animating.clone();
+        let hadj = hadj.clone();
+
+        self.scrolled_window.add_tick_callback(move |_, _| {
+            let cur = hadj.value();
+            let tgt = match *target_x.borrow() {
                 Some(t) => t,
                 None => {
                     *is_animating.borrow_mut() = false;
@@ -314,49 +394,261 @@ impl ReaderView {
             };
 
             let diff = tgt - cur;
-            let vel = velocity.get();
-            if diff.abs() < 0.25 && vel.abs() < 0.25 {
-                vadj.set_value(tgt);
-                *target_y.borrow_mut() = None;
+            if diff.abs() < 0.25 {
+                hadj.set_value(tgt);
+                *target_x.borrow_mut() = None;
                 *is_animating.borrow_mut() = false;
-
-                let total_global = global_to_key.borrow().len();
-                if total_global > 0 {
-                    let upr = vadj.upper();
-                    let psz = vadj.page_size();
-                    let current_global_idx = if tgt <= 10.0 || upr <= psz {
-                        0
-                    } else {
-                        let max_s = (upr - psz).max(1.0);
-                        let prog = (tgt / max_s).clamp(0.0, 1.0);
-                        ((prog * (total_global as f64)) as usize).min(total_global.saturating_sub(1))
-                    };
-                    Self::dispatch_requests_around(
-                        current_global_idx,
-                        &global_to_key,
-                        &page_widgets,
-                        &chapters,
-                        &in_flight,
-                        &tx,
-                    );
-                }
                 return glib::ControlFlow::Break;
             }
 
-            let new_vel = vel * 0.78 + diff * 0.08;
-            velocity.set(new_vel);
-            let next = cur + new_vel;
-            vadj.set_value(next);
+            let step = diff * 0.26;
+            let next = cur + step;
+            hadj.set_value(next);
             glib::ControlFlow::Continue
         });
+    }
+
+    pub fn get_current_global_page_idx(&self) -> usize {
+        let global_to_key = self.global_to_key.borrow();
+        let total = global_to_key.len();
+        if total == 0 {
+            return 0;
+        }
+
+        let mode = *self.reading_mode.borrow();
+        match mode {
+            ReadingMode::ContinuousVertical => {
+                let vadj = self.scrolled_window.vadjustment();
+                let val = vadj.value();
+                let upr = vadj.upper();
+                let psz = vadj.page_size();
+                if val <= 10.0 || upr <= psz {
+                    0
+                } else {
+                    let max_s = (upr - psz).max(1.0);
+                    let prog = (val / max_s).clamp(0.0, 1.0);
+                    ((prog * (total as f64)) as usize).min(total.saturating_sub(1))
+                }
+            }
+            ReadingMode::ContinuousHorizontal => {
+                let hadj = self.scrolled_window.hadjustment();
+                let val = hadj.value();
+                let psz = hadj.page_size();
+                let center_x = val + psz / 2.0;
+
+                let page_widgets = self.page_widgets.borrow();
+                let mut closest_idx = 0;
+                let mut min_dist = f64::MAX;
+
+                for (idx, key) in global_to_key.iter().enumerate() {
+                    if let Some(pw) = page_widgets.get(key) {
+                        if let Some(rect) = pw.container.compute_bounds(&self.content_box) {
+                            let pw_center = rect.x() as f64 + rect.width() as f64 / 2.0;
+                            let dist = (pw_center - center_x).abs();
+                            if dist < min_dist {
+                                min_dist = dist;
+                                closest_idx = idx;
+                            }
+                        }
+                    }
+                }
+                closest_idx
+            }
+        }
+    }
+
+    pub fn toggle_reading_mode(&self) {
+        let current = *self.reading_mode.borrow();
+        let new_mode = match current {
+            ReadingMode::ContinuousVertical => ReadingMode::ContinuousHorizontal,
+            ReadingMode::ContinuousHorizontal => ReadingMode::ContinuousVertical,
+        };
+        self.set_reading_mode(new_mode);
+    }
+
+    pub fn set_reading_mode(&self, mode: ReadingMode) {
+        *self.reading_mode.borrow_mut() = mode;
+        let curr_page_idx = self.get_current_global_page_idx();
+
+        match mode {
+            ReadingMode::ContinuousVertical => {
+                self.content_box.set_orientation(Orientation::Vertical);
+                self.content_box.set_vexpand(false);
+                self.scrolled_window
+                    .set_hscrollbar_policy(gtk4::PolicyType::Never);
+                self.scrolled_window
+                    .set_vscrollbar_policy(gtk4::PolicyType::Automatic);
+                self.clamp.set_maximum_size(900);
+                self.scrolled_window.remove_css_class("manga-fade-overlay");
+
+                let page_widgets = self.page_widgets.borrow();
+                for pw in page_widgets.values() {
+                    pw.update_layout_for_mode(ReadingMode::ContinuousVertical);
+                }
+            }
+            ReadingMode::ContinuousHorizontal => {
+                self.content_box.set_orientation(Orientation::Horizontal);
+                self.content_box.set_vexpand(true);
+                self.content_box.set_valign(Align::Fill);
+                self.content_box.set_spacing(16);
+                self.scrolled_window
+                    .set_hscrollbar_policy(gtk4::PolicyType::Automatic);
+                self.scrolled_window
+                    .set_vscrollbar_policy(gtk4::PolicyType::Never);
+                self.clamp.set_maximum_size(1600);
+                self.scrolled_window.add_css_class("manga-fade-overlay");
+
+                let page_widgets = self.page_widgets.borrow();
+                for pw in page_widgets.values() {
+                    pw.update_layout_for_mode(ReadingMode::ContinuousHorizontal);
+                }
+            }
+        }
+
+        let self_clone = self.clone();
+        glib::idle_add_local(move || {
+            self_clone.smooth_scroll_to_page(curr_page_idx);
+            glib::ControlFlow::Break
+        });
+    }
+
+    pub fn smooth_scroll_to_page(&self, global_idx: usize) {
+        let global_to_key = self.global_to_key.borrow();
+        if global_idx >= global_to_key.len() {
+            return;
+        }
+
+        let key = &global_to_key[global_idx];
+        let page_widgets = self.page_widgets.borrow();
+        if let Some(pw) = page_widgets.get(key) {
+            let mode = *self.reading_mode.borrow();
+            match mode {
+                ReadingMode::ContinuousVertical => {
+                    if let Some(rect) = pw.container.compute_bounds(&self.content_box) {
+                        self.smooth_scroll_to(rect.y() as f64);
+                    }
+                }
+                ReadingMode::ContinuousHorizontal => {
+                    if let Some(rect) = pw.container.compute_bounds(&self.content_box) {
+                        let page_x = rect.x() as f64;
+                        let page_w = rect.width() as f64;
+                        let viewport_w = self.scrolled_window.hadjustment().page_size();
+                        let target_x = page_x - (viewport_w - page_w) / 2.0;
+                        self.smooth_scroll_to_x(target_x);
+                    }
+                }
+            }
+        }
+    }
+
+    pub fn next_page(&self) {
+        let mode = *self.reading_mode.borrow();
+        if mode == ReadingMode::ContinuousHorizontal {
+            let curr_idx = self.get_current_global_page_idx();
+            let total = self.global_to_key.borrow().len();
+            if curr_idx + 1 < total {
+                self.smooth_scroll_to_page(curr_idx + 1);
+            } else {
+                let last_idx = *self.last_loaded_series_idx.borrow();
+                if let Some(ref series) = *self.series.borrow() {
+                    if last_idx + 1 < series.dir_files.len() {
+                        let next_idx = last_idx + 1;
+                        let next_path = &series.dir_files[next_idx];
+                        if let Ok(archive) = CbzArchive::open(next_path) {
+                            if self.append_chapter(archive, next_idx).is_ok() {
+                                self.smooth_scroll_to_page(curr_idx + 1);
+                            }
+                        }
+                    }
+                }
+            }
+        } else {
+            self.next_chapter();
+        }
+    }
+
+    pub fn prev_page(&self) {
+        let mode = *self.reading_mode.borrow();
+        if mode == ReadingMode::ContinuousHorizontal {
+            let curr_idx = self.get_current_global_page_idx();
+            if curr_idx > 0 {
+                self.smooth_scroll_to_page(curr_idx - 1);
+            } else {
+                let first_idx = *self.first_loaded_series_idx.borrow();
+                if first_idx > 0 {
+                    if let Some(ref series) = *self.series.borrow() {
+                        let prev_idx = first_idx - 1;
+                        let prev_path = &series.dir_files[prev_idx];
+                        if let Ok(archive) = CbzArchive::open(prev_path) {
+                            if self.prepend_chapter(archive, prev_idx).is_ok() {
+                                self.smooth_scroll_to_page(0);
+                            }
+                        }
+                    }
+                }
+            }
+        } else {
+            self.prev_chapter();
+        }
     }
 
     pub fn smooth_scroll_by(&self, delta_y: f64) {
         let vadj = self.scrolled_window.vadjustment();
         let current_val = vadj.value();
+
+        // If at top of comic and user scrolls UP (delta_y < 0), load previous chapter
+        if delta_y < 0.0 && current_val <= 10.0 {
+            let first_idx = *self.first_loaded_series_idx.borrow();
+            if first_idx > 0 {
+                self.prev_chapter();
+                return;
+            }
+        }
+
         let base_y = self.target_y.borrow().unwrap_or(current_val);
         let dest_y = base_y + delta_y;
         self.smooth_scroll_to(dest_y);
+    }
+
+    pub fn jump_to_current_chapter_top(&self) {
+        let chapters = self.chapters.borrow();
+        if chapters.is_empty() {
+            return;
+        }
+
+        let current_y = self
+            .target_y
+            .borrow()
+            .unwrap_or_else(|| self.scrolled_window.vadjustment().value());
+        let mut current_chap_idx = 0;
+        let mut current_chap_y = 0.0;
+        for (i, chap) in chapters.iter().enumerate() {
+            if let Some(rect) = chap.banner_widget.compute_bounds(&self.content_box) {
+                let y = rect.y() as f64;
+                if y <= current_y + 150.0 {
+                    current_chap_idx = i;
+                    current_chap_y = y;
+                }
+            }
+        }
+
+        if (current_y - current_chap_y).abs() < 50.0 {
+            if current_chap_idx > 0 {
+                if let Some(rect) = chapters[current_chap_idx - 1]
+                    .banner_widget
+                    .compute_bounds(&self.content_box)
+                {
+                    let target_y = rect.y() as f64;
+                    self.smooth_scroll_to(target_y);
+                    return;
+                }
+            } else {
+                self.smooth_scroll_to(0.0);
+                return;
+            }
+        }
+
+        self.smooth_scroll_to(current_chap_y);
     }
 
     pub fn next_chapter(&self) {
@@ -365,7 +657,10 @@ impl ReaderView {
             return;
         }
 
-        let current_y = self.target_y.borrow().unwrap_or_else(|| self.scrolled_window.vadjustment().value());
+        let current_y = self
+            .target_y
+            .borrow()
+            .unwrap_or_else(|| self.scrolled_window.vadjustment().value());
         let mut current_chap_idx = 0;
         for (i, chap) in chapters.iter().enumerate() {
             if let Some(rect) = chap.banner_widget.compute_bounds(&self.content_box) {
@@ -378,7 +673,10 @@ impl ReaderView {
 
         let target_chap_idx = current_chap_idx + 1;
         if target_chap_idx < chapters.len() {
-            if let Some(rect) = chapters[target_chap_idx].banner_widget.compute_bounds(&self.content_box) {
+            if let Some(rect) = chapters[target_chap_idx]
+                .banner_widget
+                .compute_bounds(&self.content_box)
+            {
                 let target_y = rect.y() as f64;
                 self.smooth_scroll_to(target_y);
             }
@@ -393,7 +691,9 @@ impl ReaderView {
                         if self.append_chapter(archive, next_idx).is_ok() {
                             let chapters = self.chapters.borrow();
                             if let Some(last_chap) = chapters.last() {
-                                if let Some(rect) = last_chap.banner_widget.compute_bounds(&self.content_box) {
+                                if let Some(rect) =
+                                    last_chap.banner_widget.compute_bounds(&self.content_box)
+                                {
                                     let target_y = rect.y() as f64;
                                     self.smooth_scroll_to(target_y);
                                 }
@@ -411,7 +711,10 @@ impl ReaderView {
             return;
         }
 
-        let current_y = self.target_y.borrow().unwrap_or_else(|| self.scrolled_window.vadjustment().value());
+        let current_y = self
+            .target_y
+            .borrow()
+            .unwrap_or_else(|| self.scrolled_window.vadjustment().value());
         let mut current_chap_idx = 0;
         let mut current_chap_y = 0.0;
         for (i, chap) in chapters.iter().enumerate() {
@@ -431,7 +734,10 @@ impl ReaderView {
 
         if current_chap_idx > 0 {
             let prev_chap_idx = current_chap_idx - 1;
-            if let Some(rect) = chapters[prev_chap_idx].banner_widget.compute_bounds(&self.content_box) {
+            if let Some(rect) = chapters[prev_chap_idx]
+                .banner_widget
+                .compute_bounds(&self.content_box)
+            {
                 let target_y = rect.y() as f64;
                 self.smooth_scroll_to(target_y);
             }
@@ -443,8 +749,8 @@ impl ReaderView {
                     let prev_idx = first_idx - 1;
                     let prev_path = &series.dir_files[prev_idx];
                     if let Ok(archive) = CbzArchive::open(prev_path) {
-                        if self.prepend_chapter(archive, prev_idx).is_ok() {
-                            self.smooth_scroll_to(0.0);
+                        if let Ok(prepended_h) = self.prepend_chapter(archive, prev_idx) {
+                            self.smooth_scroll_to(prepended_h);
                         }
                     }
                 }
@@ -492,36 +798,37 @@ impl ReaderView {
                             if let Some(pw) = page_widgets_rx.borrow().get(&key) {
                                 pw.set_loaded(&data.texture, data.width, data.height);
 
-                            let g2k_map = global_to_key_rx.borrow();
-                            let page_to_global =
-                                |k: &PageKey| g2k_map.iter().position(|x| x == k).unwrap_or(0);
+                                let g2k_map = global_to_key_rx.borrow();
+                                let page_to_global =
+                                    |k: &PageKey| g2k_map.iter().position(|x| x == k).unwrap_or(0);
 
-                            // Compute live viewport global index right now
-                            let val = vadj_rx.value();
-                            let upr = vadj_rx.upper();
-                            let psz = vadj_rx.page_size();
-                            let total_g = g2k_map.len();
+                                // Compute live viewport global index right now
+                                let val = vadj_rx.value();
+                                let upr = vadj_rx.upper();
+                                let psz = vadj_rx.page_size();
+                                let total_g = g2k_map.len();
 
-                            let live_global_idx = if val <= 10.0 || upr <= psz || total_g == 0 {
-                                0
-                            } else {
-                                let max_s = (upr - psz).max(1.0);
-                                let prog = (val / max_s).clamp(0.0, 1.0);
-                                ((prog * (total_g as f64)) as usize).min(total_g.saturating_sub(1))
-                            };
+                                let live_global_idx = if val <= 10.0 || upr <= psz || total_g == 0 {
+                                    0
+                                } else {
+                                    let max_s = (upr - psz).max(1.0);
+                                    let prog = (val / max_s).clamp(0.0, 1.0);
+                                    ((prog * (total_g as f64)) as usize)
+                                        .min(total_g.saturating_sub(1))
+                                };
 
-                            let evicted = memory_manager_rx.borrow_mut().insert(
-                                key.clone(),
-                                data,
-                                live_global_idx,
-                                &page_to_global,
-                            );
+                                let evicted = memory_manager_rx.borrow_mut().insert(
+                                    key.clone(),
+                                    data,
+                                    live_global_idx,
+                                    &page_to_global,
+                                );
 
-                            for ev_key in evicted {
-                                if let Some(ev_pw) = page_widgets_rx.borrow().get(&ev_key) {
-                                    ev_pw.set_unloaded();
+                                for ev_key in evicted {
+                                    if let Some(ev_pw) = page_widgets_rx.borrow().get(&ev_key) {
+                                        ev_pw.set_unloaded();
+                                    }
                                 }
-                            }
                             }
                         }
                         Err(e) => {
@@ -544,7 +851,7 @@ impl ReaderView {
             let upper = adj.upper();
 
             let last_val = *last_vadj_value.borrow();
-            let is_scrolling_up = value < last_val - 5.0;
+            let is_scrolling_up = value < last_val - 1.0;
             *last_vadj_value.borrow_mut() = value;
 
             // Check if near top and actively scrolling UP to auto load previous .cbz file!
@@ -741,8 +1048,7 @@ impl ReaderView {
                             let reader = std::io::BufReader::new(file);
                             let mut zip =
                                 zip::ZipArchive::new(reader).map_err(|e| e.to_string())?;
-                            let mut entry =
-                                zip.by_name(&entry_name).map_err(|e| e.to_string())?;
+                            let mut entry = zip.by_name(&entry_name).map_err(|e| e.to_string())?;
 
                             let mut buf = Vec::with_capacity(entry.size() as usize);
                             std::io::Read::read_to_end(&mut entry, &mut buf)
@@ -753,7 +1059,13 @@ impl ReaderView {
 
                         let payload = match res {
                             Ok((width, height, rgba_bytes)) => {
-                                eprintln!("[decode] {:?} ok: {}x{} ({} bytes)", key_c, width, height, rgba_bytes.len());
+                                eprintln!(
+                                    "[decode] {:?} ok: {}x{} ({} bytes)",
+                                    key_c,
+                                    width,
+                                    height,
+                                    rgba_bytes.len()
+                                );
                                 Some(DecodedImagePayload {
                                     key: key_c.clone(),
                                     current_global_idx,

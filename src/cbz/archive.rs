@@ -1,9 +1,9 @@
+use crate::cache::PageKey;
+use gdk4::Texture;
 use std::fs::File;
 use std::io::BufReader;
 use std::path::{Path, PathBuf};
 use zip::ZipArchive;
-use gdk4::Texture;
-use crate::cache::PageKey;
 
 #[allow(dead_code)]
 #[derive(Debug, Clone)]
@@ -44,7 +44,8 @@ impl CbzArchive {
         let path_buf = path.as_ref().to_path_buf();
         let file = File::open(&path_buf).map_err(|e| format!("Failed to open file: {}", e))?;
         let reader = BufReader::new(file);
-        let mut zip = ZipArchive::new(reader).map_err(|e| format!("Failed to read ZIP archive: {}", e))?;
+        let mut zip =
+            ZipArchive::new(reader).map_err(|e| format!("Failed to read ZIP archive: {}", e))?;
 
         let mut image_entries = Vec::new();
         for i in 0..zip.len() {
@@ -88,15 +89,19 @@ impl CbzArchive {
     }
 
     pub fn decode_page_bytes(bytes: &[u8]) -> Result<(u32, u32, Vec<u8>), String> {
-        let img = image::load_from_memory(bytes)
-            .map_err(|e| format!("Failed to decode image: {}", e))?;
+        let img =
+            image::load_from_memory(bytes).map_err(|e| format!("Failed to decode image: {}", e))?;
         let rgba = img.into_rgba8();
         let (width, height) = rgba.dimensions();
         let raw_rgba_bytes = rgba.into_raw();
         Ok((width, height, raw_rgba_bytes))
     }
 
-    pub fn create_texture(width: u32, height: u32, rgba_bytes: Vec<u8>) -> Result<LoadedPageData, String> {
+    pub fn create_texture(
+        width: u32,
+        height: u32,
+        rgba_bytes: Vec<u8>,
+    ) -> Result<LoadedPageData, String> {
         let byte_size = (width * height * 4) as usize;
         if rgba_bytes.len() != byte_size {
             return Err(format!(
