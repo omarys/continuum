@@ -1,0 +1,31 @@
+[package]
+name = "continuum"
+version = "0.1.0"
+edition = "2021"
+authors = ["Continuum Developer"]
+description = "A minimal, high-performance GTK4/Adwaita Manhwa comic reader (.cbz) with continuous lazy loading and seamless multi-archive scrolling."
+default-run = "continuum"
+
+[dependencies]
+gtk4 = { version = "0.9", features = ["v4_12"] }
+libadwaita = { version = "0.7", features = ["v1_5"] }
+gdk-pixbuf = "0.20"
+gio = "0.20"
+glib = "0.20"
+gdk4 = "0.9"
+
+zip = "2.2"
+image = { version = "0.25", features = ["png", "jpeg", "webp", "gif", "bmp"] }
+natord = "1.0.9"
+tracing = "0.1"
+tracing-subscriber = "0.3"
+crossbeam-channel = "0.5"
+rayon = "1.10"
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = true
+

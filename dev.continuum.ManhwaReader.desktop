@@ -1,0 +1,12 @@
+[Desktop Entry]
+Name=Continuum
+GenericName=Manhwa Reader
+Comment=Continuous scrolling GTK4/Adwaita comic reader for Manhwa (.cbz)
+Exec=/home/omary/.cargo/bin/continuum %f
+Icon=dev.continuum.ManhwaReader
+Terminal=false
+Type=Application
+Categories=Graphics;Viewer;GTK;
+MimeType=application/x-cbz;application/x-cbr;application/zip;
+StartupWMClass=dev.continuum.ManhwaReader
+Keywords=manhwa;webtoon;comic;cbz;reader;

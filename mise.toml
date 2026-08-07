@@ -1,0 +1,7 @@
+[tools]
+rust = "latest"
+pre-commit = "latest"
+rust-analyzer = "latest"
+
+[env]
+RUST_LOG = "info"
