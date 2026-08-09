@@ -1,6 +1,5 @@
-pub mod chapter_banner;
-pub mod page_widget;
-pub mod reader;
-pub mod window;
+pub mod backend;
+pub mod image_provider;
 
-pub use window::ManhwaWindow;
+pub use backend::ContinuumEngine;
+pub use image_provider::register_image_provider;

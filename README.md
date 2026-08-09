@@ -1,67 +1,57 @@
-# Continuum — Modern GTK4 / Libadwaita Manhwa Reader
+# Continuum — KDE Plasma Native Manhwa Reader (plasma branch)
 
 **Continuum** is a high-performance, minimal comic reader written in Rust, specifically optimized for vertical continuous scrolling of **Manhwa** and **Webtoons** stored in `.cbz` / `.zip` archives.
 
-> ⚡ **100% Vibe-Coded with Gemini 3.6 Flash**
-> This entire codebase was **100% vibe-coded** using **Gemini 3.6 Flash** via Google Antigravity—from native GTK4/Adwaita layout design and `zip` archive extraction to multi-threaded memory caching and zero-layout-shift scrolling.
+This branch (`plasma`) is refactored to be **KDE Plasma Native**, built with **Qt 6, QML & Kirigami (KF6)**, seamlessly integrating with the KDE Plasma desktop, Breeze styling, and Kirigami HIG.
 
 ---
 
 ## Key Features
 
-- **Libadwaita / GTK4 Design**: Sleek, modern Linux desktop integration with dark mode aesthetics, clean status pages, header bars, and native file pickers.
-- **Click Anywhere to Open**: When no comic is open, clicking anywhere on the window opens the native `.cbz` file picker.
-- **Continuous & Seamless Multi-Archive Scrolling**: Automatically detects sister `.cbz` files in the same directory (e.g. `SoloLeveling_Ch01.cbz`, `SoloLeveling_Ch02.cbz`) and seamlessly appends next chapters as you scroll down.
-- **Upward Scroll & Anticipatory Preloading**: Scroll back up to previous chapters effortlessly with zero delay.
-- **Zero Layout Shifts**: Pre-calculates exact page heights upon opening archives to prevent scroll jumping or position shifts.
-- **Lazy Load & Memory Management**:
-  - Uses `zip` crate to lazy load page contents asynchronously on background thread pools.
-  - Maintains a **minimum of 256MB** loaded pre-buffer in memory for stutter-free instant scrolling.
-  - Enforces a **maximum 1024MB (1GB)** memory cap, keeping memory light without interrupting the reader.
+- **KDE Plasma & Kirigami (KF6) Design**: Modern Linux KDE Plasma desktop integration with Breeze dark theme styling, Kirigami HeaderBar, action items, and native Qt file pickers.
+- **Click Anywhere to Open**: When no comic is open, clicking anywhere on the screen opens the native KDE `.cbz` file picker.
+- **Continuous & Seamless Multi-Archive Scrolling**: Automatically detects sister `.cbz` files in the same directory (e.g. `SoloLeveling_Ch01.cbz`, `SoloLeveling_Ch02.cbz`) and appends next chapters as you scroll.
+- **Vertical & Horizontal Reading Modes**: Toggle instantly between Vertical continuous scrolling (Manhwa) and Horizontal page stepping (Manga) with key `M`.
+- **High-Performance Memory Management**:
+  - Uses Rust background threadpool for fast `zip` extraction and RGBA decoding.
+  - Custom `QQuickImageProvider` serving dynamic textures directly to QML scene graph at 60FPS.
+  - Maintains 256MB pre-buffer and 1024MB memory cap.
 
 ---
 
-## Desktop Launcher & System Installation
+## System Requirements & Prerequisites (Arch Linux / Fedora / Ubuntu KDE)
 
-To install **Continuum** to your Linux desktop application menu with system icons and `.cbz` file manager associations:
+Ensure Qt 6 and Kirigami development packages are installed:
 
 ```bash
-./install.sh
-```
-
-This installs:
-1. Binary: `~/.cargo/bin/continuum`
-2. Desktop Entry: `~/.local/share/applications/dev.continuum.ManhwaReader.desktop`
-3. Application Icon: `~/.local/share/icons/hicolor/512x512/apps/dev.continuum.ManhwaReader.png`
-
-Once installed, **Continuum** appears in your GNOME / KDE / XFCE app launcher menu and allows opening `.cbz` files directly from your file manager.
-
----
-
-## Development Setup
-
-Dependencies are managed with `mise` and pre-commit hooks are configured via `pre-commit-config.yml`.
-
-### Prerequisites (Ubuntu / Debian / Fedora / Arch)
-
-Ensure system GTK4 & Libadwaita development headers are installed:
-```bash
-# Ubuntu / Debian
-sudo apt install build-essential libgtk-4-dev libadwaita-1-dev pkg-config
-
-# Fedora
-sudo dnf install gtk4-devel libadwaita-devel pkg-config
-
 # Arch Linux
-sudo pacman -S gtk4 libadwaita pkg-config
+sudo pacman -S qt6-base qt6-declarative kirigami kirigami-addons cmake extra-cmake-modules
+
+# Fedora KDE
+sudo dnf install qt6-qtbase-devel qt6-qtdeclarative-devel kf6-kirigami-devel cmake extra-cmake-modules
+
+# Ubuntu KDE / Kubuntu
+sudo apt install qt6-base-dev qml6-module-org-kde-kirigami kf6-kirigami-dev cmake extra-cmake-modules
 ```
 
-### Build & Run from CLI
+---
+
+## Build & Run
 
 ```bash
 # Run application
 cargo run
 
-# Run with a sample archive
+# Run with a specific CBZ archive
 cargo run -- sample_comics/Solo_Leveling_Ch01.cbz
+```
+
+---
+
+## Desktop Installation
+
+To install **Continuum** to your KDE Plasma application launcher menu:
+
+```bash
+./install.sh
 ```

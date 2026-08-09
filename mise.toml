@@ -2,6 +2,7 @@
 rust = "latest"
 pre-commit = "latest"
 rust-analyzer = "latest"
+rtk = "latest"
 
 [env]
 RUST_LOG = "info"

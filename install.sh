@@ -1,20 +1,30 @@
 #!/usr/bin/env bash
 set -e
 
-echo "Building and installing Continuum..."
-cargo install --path .
+echo "=== Installing Continuum (KDE Plasma Native) ==="
 
-echo "Installing desktop entry and icons..."
+# Build release binary
+cargo build --release
+
+# Install binary to user path
+mkdir -p ~/.local/bin
+cp target/release/continuum ~/.local/bin/continuum
+
+# Install Desktop Entry
 mkdir -p ~/.local/share/applications
+cp dev.continuum.ManhwaReader.desktop ~/.local/share/applications/
+
+# Install Icon
 mkdir -p ~/.local/share/icons/hicolor/512x512/apps
-mkdir -p ~/.local/share/pixmaps
+cp dev.continuum.ManhwaReader.png ~/.local/share/icons/hicolor/512x512/apps/
 
-cp dev.continuum.ManhwaReader.png ~/.local/share/icons/hicolor/512x512/apps/dev.continuum.ManhwaReader.png
-cp dev.continuum.ManhwaReader.png ~/.local/share/pixmaps/dev.continuum.ManhwaReader.png
-cp dev.continuum.ManhwaReader.desktop ~/.local/share/applications/dev.continuum.ManhwaReader.desktop
-
+# Refresh desktop database & KDE Plasma sycoca
 if command -v update-desktop-database >/dev/null 2>&1; then
     update-desktop-database ~/.local/share/applications
 fi
 
-echo "Done! Continuum is now installed and available in your application launcher menu."
+if command -v kbuildsycoca6 >/dev/null 2>&1; then
+    kbuildsycoca6 --noincremental || true
+fi
+
+echo "✅ Continuum successfully installed to KDE Plasma environment!"

@@ -1,5 +1,4 @@
 use crate::cbz::archive::LoadedPageData;
-use gdk4::Texture;
 use std::collections::HashMap;
 
 pub const MIN_CACHE_BYTES: usize = 256 * 1024 * 1024; // 256 MB minimum loaded
@@ -12,15 +11,14 @@ pub struct PageKey {
 }
 
 #[allow(dead_code)]
+#[derive(Clone, Debug)]
 pub struct PageCacheEntry {
     pub key: PageKey,
-    pub texture: Texture,
-    pub width: u32,
-    pub height: u32,
-    pub byte_size: usize,
+    pub data: LoadedPageData,
     pub last_accessed_idx: usize,
 }
 
+#[derive(Default)]
 pub struct MemoryManager {
     entries: HashMap<PageKey, PageCacheEntry>,
     total_bytes: usize,
@@ -29,11 +27,7 @@ pub struct MemoryManager {
 
 impl MemoryManager {
     pub fn new() -> Self {
-        Self {
-            entries: HashMap::new(),
-            total_bytes: 0,
-            access_counter: 0,
-        }
+        Self::default()
     }
 
     #[allow(dead_code)]
@@ -46,18 +40,16 @@ impl MemoryManager {
         self.entries.len()
     }
 
-    #[allow(dead_code)]
-    pub fn get(&mut self, key: &PageKey) -> Option<Texture> {
+    pub fn get(&mut self, key: &PageKey) -> Option<LoadedPageData> {
         if let Some(entry) = self.entries.get_mut(key) {
             self.access_counter += 1;
             entry.last_accessed_idx = self.access_counter;
-            Some(entry.texture.clone())
+            Some(entry.data.clone())
         } else {
             None
         }
     }
 
-    #[allow(dead_code)]
     pub fn contains(&self, key: &PageKey) -> bool {
         self.entries.contains_key(key)
     }
@@ -70,7 +62,7 @@ impl MemoryManager {
         page_to_global_map: &dyn Fn(&PageKey) -> usize,
     ) -> Vec<PageKey> {
         if let Some(old) = self.entries.remove(&key) {
-            self.total_bytes = self.total_bytes.saturating_sub(old.byte_size);
+            self.total_bytes = self.total_bytes.saturating_sub(old.data.byte_size);
         }
 
         self.access_counter += 1;
@@ -79,15 +71,11 @@ impl MemoryManager {
             key.clone(),
             PageCacheEntry {
                 key,
-                texture: data.texture,
-                width: data.width,
-                height: data.height,
-                byte_size: data.byte_size,
+                data,
                 last_accessed_idx: self.access_counter,
             },
         );
 
-        // Perform memory eviction if over MAX_CACHE_BYTES (1024MB)
         self.evict_if_needed(current_visible_global_idx, page_to_global_map)
     }
 
@@ -102,18 +90,16 @@ impl MemoryManager {
             return evicted_keys;
         }
 
-        // Sort loaded pages by distance to currently visible global index (furthest first)
         let mut candidates: Vec<(PageKey, usize, usize)> = self
             .entries
             .iter()
             .map(|(key, entry)| {
                 let global_idx = page_to_global_map(key);
                 let distance = global_idx.abs_diff(current_visible_global_idx);
-                (key.clone(), distance, entry.byte_size)
+                (key.clone(), distance, entry.data.byte_size)
             })
             .collect();
 
-        // Sort descending by distance (furthest pages are evicted first)
         candidates.sort_by_key(|c| std::cmp::Reverse(c.1));
 
         for (key, _dist, size) in candidates {
@@ -127,7 +113,7 @@ impl MemoryManager {
             }
 
             if let Some(removed) = self.entries.remove(&key) {
-                self.total_bytes = self.total_bytes.saturating_sub(removed.byte_size);
+                self.total_bytes = self.total_bytes.saturating_sub(removed.data.byte_size);
                 evicted_keys.push(key);
             }
         }
@@ -138,7 +124,7 @@ impl MemoryManager {
     #[allow(dead_code)]
     pub fn remove(&mut self, key: &PageKey) {
         if let Some(entry) = self.entries.remove(key) {
-            self.total_bytes = self.total_bytes.saturating_sub(entry.byte_size);
+            self.total_bytes = self.total_bytes.saturating_sub(entry.data.byte_size);
         }
     }
 

@@ -1,3 +1,4 @@
 pub mod archive;
 
-pub use archive::{CbzArchive, DecodedImagePayload, DirectorySeries};
+#[allow(unused_imports)]
+pub use archive::{CbzArchive, DirectorySeries};

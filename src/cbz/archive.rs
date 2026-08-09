@@ -1,5 +1,4 @@
 use crate::cache::PageKey;
-use gdk4::Texture;
 use std::fs::File;
 use std::io::BufReader;
 use std::path::{Path, PathBuf};
@@ -15,13 +14,12 @@ pub struct CbzPageInfo {
     pub total_pages: usize,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct LoadedPageData {
-    pub texture: Texture,
     pub width: u32,
     pub height: u32,
+    pub rgba_bytes: Vec<u8>,
     pub byte_size: usize,
-    pub _bytes: glib::Bytes,
 }
 
 #[allow(dead_code)]
@@ -84,6 +82,7 @@ impl CbzArchive {
         self.image_entries.len()
     }
 
+    #[allow(dead_code)]
     pub fn get_dimensions(&self, _index: usize) -> (u32, u32) {
         (800, 1400)
     }
@@ -97,7 +96,7 @@ impl CbzArchive {
         Ok((width, height, raw_rgba_bytes))
     }
 
-    pub fn create_texture(
+    pub fn create_page_data(
         width: u32,
         height: u32,
         rgba_bytes: Vec<u8>,
@@ -110,23 +109,11 @@ impl CbzArchive {
                 rgba_bytes.len()
             ));
         }
-        let bytes = glib::Bytes::from_owned(rgba_bytes);
-        let pixbuf = gdk_pixbuf::Pixbuf::from_bytes(
-            &bytes,
-            gdk_pixbuf::Colorspace::Rgb,
-            true,
-            8,
-            width as i32,
-            height as i32,
-            width as i32 * 4,
-        );
-        let texture = Texture::for_pixbuf(&pixbuf);
         Ok(LoadedPageData {
-            texture,
             width,
             height,
+            rgba_bytes,
             byte_size,
-            _bytes: bytes,
         })
     }
 
@@ -146,6 +133,7 @@ impl CbzArchive {
 }
 
 #[allow(dead_code)]
+#[derive(Clone, Debug)]
 pub struct DirectorySeries {
     pub current_path: PathBuf,
     pub dir_files: Vec<PathBuf>,
