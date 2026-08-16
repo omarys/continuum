@@ -175,7 +175,7 @@ impl DirectorySeries {
 
         let current_index = dir_files
             .iter()
-            .position(|p| p == &current_path)
+            .position(|p| p == &current_path || p.file_name() == current_path.file_name())
             .unwrap_or(0);
 
         Self {

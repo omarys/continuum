@@ -5,19 +5,21 @@ import org.kde.kirigami as Kirigami
 
 Kirigami.OverlaySheet {
     id: sheet
-    title: "Keyboard Shortcuts Cheat Sheet"
+    title: "Keyboard & Touch Shortcuts"
 
-    Kirigami.FormLayout {
-        wideMode: true
+    ColumnLayout {
+        Kirigami.FormLayout {
+            wideMode: true
+            Layout.preferredWidth: Kirigami.Units.gridUnit * 22
 
         Kirigami.Heading {
-            text: "Reading & Navigation"
+            text: "Reading & Scrolling"
             level: 3
         }
 
         Controls.Label {
-            Kirigami.FormData.label: "Toggle Reading Mode:"
-            text: "M (Manhwa Vertical / Manga Horizontal)"
+            Kirigami.FormData.label: "Toggle Mode:"
+            text: "M (Vertical Webtoon / Horizontal Manga)"
         }
 
         Controls.Label {
@@ -31,8 +33,13 @@ Kirigami.OverlaySheet {
         }
 
         Controls.Label {
-            Kirigami.FormData.label: "Full Page Scroll:"
-            text: "Space / Shift + Space"
+            Kirigami.FormData.label: "Page Scroll:"
+            text: "Space (Down) / Shift + Space (Up)"
+        }
+
+        Controls.Label {
+            Kirigami.FormData.label: "Zoom In / Out / Reset:"
+            text: "+ / - / 0"
         }
 
         Kirigami.Heading {
@@ -41,13 +48,23 @@ Kirigami.OverlaySheet {
         }
 
         Controls.Label {
-            Kirigami.FormData.label: "Next / Previous Chapter:"
-            text: "L / H or ] / ["
+            Kirigami.FormData.label: "Next / Prev Chapter:"
+            text: "] / [ or L / H (in Webtoon mode)"
         }
 
         Kirigami.Heading {
-            text: "Application"
+            text: "Interface & Application"
             level: 3
+        }
+
+        Controls.Label {
+            Kirigami.FormData.label: "Toggle Fullscreen:"
+            text: "F11 / F or Double-tap screen"
+        }
+
+        Controls.Label {
+            Kirigami.FormData.label: "Toggle Controls / Immersive:"
+            text: "Tap comic page center"
         }
 
         Controls.Label {
@@ -65,4 +82,5 @@ Kirigami.OverlaySheet {
             text: "Q"
         }
     }
+}
 }

@@ -1,8 +1,8 @@
 use crate::cbz::archive::LoadedPageData;
 use std::collections::HashMap;
 
-pub const MIN_CACHE_BYTES: usize = 256 * 1024 * 1024; // 256 MB minimum loaded
-pub const MAX_CACHE_BYTES: usize = 1024 * 1024 * 1024; // 1024 MB maximum allowed
+pub const MIN_CACHE_BYTES: usize = 128 * 1024 * 1024; // 128 MB minimum loaded
+pub const MAX_CACHE_BYTES: usize = 512 * 1024 * 1024; // 512 MB maximum allowed
 
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
 pub struct PageKey {

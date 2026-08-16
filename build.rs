@@ -1,4 +1,7 @@
 fn main() {
+    println!("cargo:rerun-if-changed=src");
+    println!("cargo:rerun-if-changed=qml");
+    println!("cargo:rerun-if-changed=continuum.png");
     let mut config = cpp_build::Config::new();
     config
         .include("/usr/include/qt6")
@@ -6,6 +9,10 @@ fn main() {
         .include("/usr/include/qt6/QtQml")
         .include("/usr/include/qt6/QtCore")
         .include("/usr/include/qt6/QtQuick")
+        .flag("-include")
+        .flag("QtGui/QGuiApplication")
+        .flag("-include")
+        .flag("QtGui/QIcon")
         .flag("-include")
         .flag("QtGui/QImage")
         .flag("-include")

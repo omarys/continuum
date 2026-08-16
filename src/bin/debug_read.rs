@@ -4,7 +4,9 @@ use std::path::PathBuf;
 use zip::ZipArchive;
 
 fn main() {
-    let path = PathBuf::from("/home/omary/Documents/Books/TGED/Official_Chapter 70_95fbe1.cbz");
+    let path = PathBuf::from(
+        "/home/omary/Documents/Manga/The_Greatest_Estate_Developer/[0001]_Chapter_1.cbz",
+    );
     println!("Opening archive: {:?}", path);
     let file = File::open(&path).expect("Failed to open file");
     let reader = BufReader::new(file);

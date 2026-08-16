@@ -2,11 +2,12 @@
 Name=Continuum
 GenericName=Manhwa Reader
 Comment=High-performance KDE Plasma native continuous comic reader for Manhwa (.cbz)
-Exec=continuum %f
+Exec=continuum %F
 Icon=dev.continuum.ManhwaReader
 Terminal=false
 Type=Application
 Categories=Graphics;Viewer;KDE;Qt;
 MimeType=application/x-cbz;application/x-cbr;application/zip;
-StartupWMClass=continuum
+StartupWMClass=dev.continuum.ManhwaReader
+StartupNotify=true
 Keywords=manhwa;webtoon;comic;cbz;reader;kde;plasma;qt;kirigami;
