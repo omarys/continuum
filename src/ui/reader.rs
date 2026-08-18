@@ -1,5 +1,5 @@
 use gtk4::prelude::*;
-use gtk4::{Align, Box as GtkBox, Button, GestureClick, Orientation, ScrolledWindow};
+use gtk4::{Align, Box as GtkBox, Button, Orientation, ScrolledWindow};
 use libadwaita::{Clamp, StatusPage};
 
 use std::cell::RefCell;
@@ -15,17 +15,12 @@ use crate::cbz::{CbzArchive, DecodedImagePayload, DirectorySeries};
 use crate::ui::chapter_banner::create_chapter_banner;
 use crate::ui::page_widget::{PageWidget, ReadingMode};
 
-pub type OpenFileCallback = Rc<RefCell<Option<Box<dyn Fn()>>>>;
-
-#[allow(dead_code)]
 pub struct ChapterState {
     pub chapter_id: usize,
-    pub series_idx: usize,
     pub archive: CbzArchive,
     pub banner_widget: GtkBox,
 }
 
-#[allow(dead_code)]
 #[derive(Clone)]
 pub struct ReaderView {
     pub container: GtkBox,
@@ -53,9 +48,6 @@ pub struct ReaderView {
     // Channels
     pub tx: Sender<(PageKey, Option<DecodedImagePayload>)>,
     pub rx: Receiver<(PageKey, Option<DecodedImagePayload>)>,
-
-    // Callbacks
-    pub open_file_callback: OpenFileCallback,
 }
 
 impl ReaderView {
@@ -117,23 +109,8 @@ impl ReaderView {
         let target_x = Rc::new(RefCell::new(None));
         let is_animating = Rc::new(RefCell::new(false));
         let reading_mode = Rc::new(RefCell::new(ReadingMode::ContinuousVertical));
-        let open_file_callback: OpenFileCallback = Rc::new(RefCell::new(None));
 
         let (tx, rx) = unbounded::<(PageKey, Option<DecodedImagePayload>)>();
-
-        // Click anywhere to open file picker if no file is open
-        let gesture = GestureClick::new();
-        let open_cb_clone = open_file_callback.clone();
-        let chapters_clone = chapters.clone();
-
-        gesture.connect_pressed(move |_, _, _, _| {
-            if chapters_clone.borrow().is_empty() {
-                if let Some(cb) = open_cb_clone.borrow().as_ref() {
-                    cb();
-                }
-            }
-        });
-        container.add_controller(gesture);
 
         let reader = Self {
             container,
@@ -157,15 +134,10 @@ impl ReaderView {
             reading_mode,
             tx,
             rx,
-            open_file_callback,
         };
 
         reader.setup_scroll_listener();
         reader
-    }
-
-    pub fn set_on_open_file<F: Fn() + 'static>(&self, callback: F) {
-        *self.open_file_callback.borrow_mut() = Some(Box::new(callback));
     }
 
     pub fn load_initial_file(&self, path: PathBuf) -> Result<(), String> {
@@ -231,7 +203,6 @@ impl ReaderView {
 
         self.chapters.borrow_mut().push(ChapterState {
             chapter_id,
-            series_idx,
             archive,
             banner_widget: banner,
         });
@@ -276,7 +247,6 @@ impl ReaderView {
             0,
             ChapterState {
                 chapter_id: prev_chap_id,
-                series_idx,
                 archive,
                 banner_widget: banner,
             },
@@ -768,7 +738,6 @@ impl ReaderView {
         let memory_manager = self.memory_manager.clone();
 
         let series_clone = self.series.clone();
-        let content_box_clone = self.content_box.clone();
         let first_loaded_idx = self.first_loaded_series_idx.clone();
         let last_loaded_idx = self.last_loaded_series_idx.clone();
         let last_vadj_value = self.last_vadj_value.clone();
@@ -845,6 +814,7 @@ impl ReaderView {
             glib::ControlFlow::Continue
         });
 
+        let reader_c = self.clone();
         vadjustment.connect_value_changed(move |adj| {
             let value = adj.value();
             let page_size = adj.page_size();
@@ -859,50 +829,14 @@ impl ReaderView {
             if value <= 600.0 && is_scrolling_up && first_idx > 0 {
                 if let Some(ref series) = *series_clone.borrow() {
                     let prev_idx = first_idx - 1;
-                    let prev_path = &series.dir_files[prev_idx];
-                    if let Ok(archive) = CbzArchive::open(prev_path) {
-                        *first_loaded_idx.borrow_mut() = prev_idx;
-                        let prev_chap_id = chapters.borrow().len();
-                        let total_pages = archive.page_count();
-
-                        let mut new_keys = Vec::with_capacity(total_pages);
-                        for page_idx in 0..total_pages {
-                            new_keys.push(PageKey {
-                                chapter_idx: prev_chap_id,
-                                page_idx,
+                    if let Ok(archive) = CbzArchive::open(&series.dir_files[prev_idx]) {
+                        if let Ok(prepended_h) = reader_c.prepend_chapter(archive, prev_idx) {
+                            let adj_c = adj.clone();
+                            glib::idle_add_local(move || {
+                                adj_c.set_value(value + prepended_h);
+                                glib::ControlFlow::Break
                             });
                         }
-
-                        global_to_key.borrow_mut().splice(0..0, new_keys.clone());
-
-                        let mut prepended_h = 100.0;
-                        for page_idx in (0..total_pages).rev() {
-                            let (w, h) = archive.get_dimensions(page_idx);
-                            let key = &new_keys[page_idx];
-                            let pw = PageWidget::new(key.clone(), page_idx, total_pages, w, h);
-                            prepended_h += pw.expected_height as f64;
-                            content_box_clone.prepend(&pw.container);
-                            page_widgets.borrow_mut().insert(key.clone(), pw);
-                        }
-
-                        let banner = create_chapter_banner(&archive.filename, total_pages);
-                        content_box_clone.prepend(&banner);
-
-                        chapters.borrow_mut().insert(
-                            0,
-                            ChapterState {
-                                chapter_id: prev_chap_id,
-                                series_idx: prev_idx,
-                                archive,
-                                banner_widget: banner,
-                            },
-                        );
-
-                        let adj_c = adj.clone();
-                        glib::idle_add_local(move || {
-                            adj_c.set_value(value + prepended_h);
-                            glib::ControlFlow::Break
-                        });
                     }
                 }
             }
@@ -913,33 +847,8 @@ impl ReaderView {
                 if let Some(ref series) = *series_clone.borrow() {
                     if last_idx + 1 < series.dir_files.len() {
                         let next_idx = last_idx + 1;
-                        let next_path = &series.dir_files[next_idx];
-                        if let Ok(archive) = CbzArchive::open(next_path) {
-                            *last_loaded_idx.borrow_mut() = next_idx;
-                            let next_chap_id = chapters.borrow().len();
-                            let total_pages = archive.page_count();
-
-                            let banner = create_chapter_banner(&archive.filename, total_pages);
-                            content_box_clone.append(&banner);
-
-                            for page_idx in 0..total_pages {
-                                let (w, h) = archive.get_dimensions(page_idx);
-                                let key = PageKey {
-                                    chapter_idx: next_chap_id,
-                                    page_idx,
-                                };
-                                let pw = PageWidget::new(key.clone(), page_idx, total_pages, w, h);
-                                content_box_clone.append(&pw.container);
-                                page_widgets.borrow_mut().insert(key.clone(), pw);
-                                global_to_key.borrow_mut().push(key);
-                            }
-
-                            chapters.borrow_mut().push(ChapterState {
-                                chapter_id: next_chap_id,
-                                series_idx: next_idx,
-                                archive,
-                                banner_widget: banner,
-                            });
+                        if let Ok(archive) = CbzArchive::open(&series.dir_files[next_idx]) {
+                            let _ = reader_c.append_chapter(archive, next_idx);
                         }
                     }
                 }
@@ -1067,8 +976,6 @@ impl ReaderView {
                                     rgba_bytes.len()
                                 );
                                 Some(DecodedImagePayload {
-                                    key: key_c.clone(),
-                                    current_global_idx,
                                     width,
                                     height,
                                     rgba_bytes,
@@ -1087,12 +994,6 @@ impl ReaderView {
                 }
             }
         }
-    }
-
-    #[allow(dead_code)]
-    pub fn trigger_lazy_load(&self) {
-        let vadj = self.scrolled_window.vadjustment();
-        vadj.emit_by_name::<()>("value-changed", &[]);
     }
 
     pub fn clear(&self) {

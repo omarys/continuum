@@ -21,30 +21,24 @@ fn main() -> glib::ExitCode {
     });
 
     app.connect_activate(|app| {
-        let manhwa_window = ManhwaWindow::new(app);
-
-        let args: Vec<String> = env::args().collect();
-        if args.len() > 1 {
-            let path = PathBuf::from(&args[1]);
-            if path.exists() {
-                let _ = manhwa_window.reader.load_initial_file(path);
-            }
-        }
-
-        manhwa_window.window.present();
+        let path = env::args().nth(1).map(PathBuf::from);
+        open_window(app, path);
     });
 
     app.connect_open(|app, files, _| {
-        let manhwa_window = ManhwaWindow::new(app);
-        if let Some(file) = files.first() {
-            if let Some(path) = file.path() {
-                let _ = manhwa_window.reader.load_initial_file(path);
-            }
-        }
-        manhwa_window.window.present();
+        let path = files.first().and_then(|f| f.path());
+        open_window(app, path);
     });
 
     app.run()
+}
+
+fn open_window(app: &libadwaita::Application, path: Option<PathBuf>) {
+    let manhwa_window = ManhwaWindow::new(app);
+    if let Some(p) = path.filter(|p| p.exists()) {
+        let _ = manhwa_window.reader.load_initial_file(p);
+    }
+    manhwa_window.window.present();
 }
 
 fn load_custom_styles() {

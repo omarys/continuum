@@ -36,32 +36,6 @@ impl MemoryManager {
         }
     }
 
-    #[allow(dead_code)]
-    pub fn total_bytes(&self) -> usize {
-        self.total_bytes
-    }
-
-    #[allow(dead_code)]
-    pub fn loaded_count(&self) -> usize {
-        self.entries.len()
-    }
-
-    #[allow(dead_code)]
-    pub fn get(&mut self, key: &PageKey) -> Option<Texture> {
-        if let Some(entry) = self.entries.get_mut(key) {
-            self.access_counter += 1;
-            entry.last_accessed_idx = self.access_counter;
-            Some(entry.texture.clone())
-        } else {
-            None
-        }
-    }
-
-    #[allow(dead_code)]
-    pub fn contains(&self, key: &PageKey) -> bool {
-        self.entries.contains_key(key)
-    }
-
     pub fn insert(
         &mut self,
         key: PageKey,
@@ -120,9 +94,7 @@ impl MemoryManager {
             if self.total_bytes <= MAX_CACHE_BYTES {
                 break;
             }
-            if self.total_bytes.saturating_sub(size) < MIN_CACHE_BYTES
-                && self.total_bytes <= MAX_CACHE_BYTES
-            {
+            if self.total_bytes.saturating_sub(size) < MIN_CACHE_BYTES {
                 break;
             }
 
@@ -135,15 +107,38 @@ impl MemoryManager {
         evicted_keys
     }
 
-    #[allow(dead_code)]
-    pub fn remove(&mut self, key: &PageKey) {
-        if let Some(entry) = self.entries.remove(key) {
-            self.total_bytes = self.total_bytes.saturating_sub(entry.byte_size);
-        }
-    }
-
     pub fn clear(&mut self) {
         self.entries.clear();
         self.total_bytes = 0;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_memory_manager_initial_state() {
+        let mgr = MemoryManager::new();
+        assert_eq!(mgr.total_bytes, 0);
+        assert!(mgr.entries.is_empty());
+    }
+
+    #[test]
+    fn test_memory_manager_clear() {
+        let mut mgr = MemoryManager::new();
+        mgr.total_bytes = 500;
+        mgr.clear();
+        assert_eq!(mgr.total_bytes, 0);
+        assert!(mgr.entries.is_empty());
+    }
+
+    #[test]
+    fn test_eviction_under_limit_does_nothing() {
+        let mut mgr = MemoryManager::new();
+        mgr.total_bytes = 100 * 1024 * 1024; // 100MB (under 1024MB)
+        let map = |_k: &PageKey| 0;
+        let evicted = mgr.evict_if_needed(0, &map);
+        assert!(evicted.is_empty());
     }
 }

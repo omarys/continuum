@@ -1,19 +1,8 @@
-use crate::cache::PageKey;
 use gdk4::Texture;
 use std::fs::File;
 use std::io::BufReader;
 use std::path::{Path, PathBuf};
 use zip::ZipArchive;
-
-#[allow(dead_code)]
-#[derive(Debug, Clone)]
-pub struct CbzPageInfo {
-    pub archive_path: PathBuf,
-    pub archive_name: String,
-    pub inner_filename: String,
-    pub page_index: usize,
-    pub total_pages: usize,
-}
 
 #[derive(Clone)]
 pub struct LoadedPageData {
@@ -24,10 +13,7 @@ pub struct LoadedPageData {
     pub _bytes: glib::Bytes,
 }
 
-#[allow(dead_code)]
 pub struct DecodedImagePayload {
-    pub key: PageKey,
-    pub current_global_idx: usize,
     pub width: u32,
     pub height: u32,
     pub rgba_bytes: Vec<u8>,
@@ -129,25 +115,9 @@ impl CbzArchive {
             _bytes: bytes,
         })
     }
-
-    #[allow(dead_code)]
-    pub fn page_info(&self, index: usize) -> Option<CbzPageInfo> {
-        if index >= self.image_entries.len() {
-            return None;
-        }
-        Some(CbzPageInfo {
-            archive_path: self.path.clone(),
-            archive_name: self.filename.clone(),
-            inner_filename: self.image_entries[index].clone(),
-            page_index: index,
-            total_pages: self.image_entries.len(),
-        })
-    }
 }
 
-#[allow(dead_code)]
 pub struct DirectorySeries {
-    pub current_path: PathBuf,
     pub dir_files: Vec<PathBuf>,
     pub current_index: usize,
 }
@@ -155,34 +125,26 @@ pub struct DirectorySeries {
 impl DirectorySeries {
     pub fn new<P: AsRef<Path>>(file_path: P) -> Self {
         let current_path = file_path.as_ref().to_path_buf();
-        let mut dir_files = Vec::new();
-
-        if let Some(parent) = current_path.parent() {
-            if let Ok(entries) = std::fs::read_dir(parent) {
-                for entry in entries.flatten() {
-                    let path = entry.path();
-                    if path.is_file() {
-                        if let Some(ext) = path.extension() {
-                            let ext_str = ext.to_string_lossy().to_lowercase();
-                            if ext_str == "cbz" || ext_str == "zip" {
-                                dir_files.push(path);
-                            }
-                        }
-                    }
-                }
-            }
-        }
+        let mut dir_files: Vec<PathBuf> = current_path
+            .parent()
+            .and_then(|p| std::fs::read_dir(p).ok())
+            .into_iter()
+            .flat_map(|entries| entries.flatten())
+            .map(|e| e.path())
+            .filter(|p| {
+                p.is_file()
+                    && p.extension().is_some_and(|ext| {
+                        let e = ext.to_string_lossy().to_lowercase();
+                        e == "cbz" || e == "zip"
+                    })
+            })
+            .collect();
 
         dir_files.sort_by(|a, b| {
-            let name_a = a
-                .file_name()
-                .map(|s| s.to_string_lossy())
-                .unwrap_or_default();
-            let name_b = b
-                .file_name()
-                .map(|s| s.to_string_lossy())
-                .unwrap_or_default();
-            natord::compare(&name_a, &name_b)
+            natord::compare(
+                &a.file_name().unwrap_or_default().to_string_lossy(),
+                &b.file_name().unwrap_or_default().to_string_lossy(),
+            )
         });
 
         let current_index = dir_files
@@ -191,19 +153,42 @@ impl DirectorySeries {
             .unwrap_or(0);
 
         Self {
-            current_path,
             dir_files,
             current_index,
         }
     }
+}
 
-    #[allow(dead_code)]
-    pub fn next_path(&self, offset_from_current: usize) -> Option<PathBuf> {
-        let idx = self.current_index + offset_from_current;
-        if idx < self.dir_files.len() {
-            Some(self.dir_files[idx].clone())
-        } else {
-            None
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_open_sample_comic() {
+        let sample = PathBuf::from("sample_comics/Solo_Leveling_Ch01.cbz");
+        if sample.exists() {
+            let archive = CbzArchive::open(&sample).expect("Should open sample comic");
+            assert!(archive.page_count() > 0);
+            assert_eq!(archive.filename, "Solo_Leveling_Ch01.cbz");
         }
+    }
+
+    #[test]
+    fn test_directory_series_sorting() {
+        let sample1 = PathBuf::from("sample_comics/Solo_Leveling_Ch01.cbz");
+        let sample2 = PathBuf::from("sample_comics/Solo_Leveling_Ch02.cbz");
+        if sample1.exists() && sample2.exists() {
+            let series1 = DirectorySeries::new(&sample1);
+            let series2 = DirectorySeries::new(&sample2);
+            assert_eq!(series1.dir_files, series2.dir_files);
+            assert_eq!(series1.current_index, 0);
+            assert_eq!(series2.current_index, 1);
+        }
+    }
+
+    #[test]
+    fn test_decode_page_bytes_invalid() {
+        let bad_bytes = vec![0u8; 16];
+        assert!(CbzArchive::decode_page_bytes(&bad_bytes).is_err());
     }
 }

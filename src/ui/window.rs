@@ -132,16 +132,20 @@ impl ManhwaWindow {
         };
 
         let open_file_rc = Rc::new(open_file_fn);
-
         let open_cb1 = open_file_rc.clone();
         open_btn.connect_clicked(move |_| {
             open_cb1();
         });
 
         let open_cb2 = open_file_rc.clone();
-        self.reader.set_on_open_file(move || {
-            open_cb2();
+        let chapters = self.reader.chapters.clone();
+        let gesture = gtk4::GestureClick::new();
+        gesture.connect_pressed(move |_, _, _, _| {
+            if chapters.borrow().is_empty() {
+                open_cb2();
+            }
         });
+        self.reader.container.add_controller(gesture);
 
         let key_controller = gtk4::EventControllerKey::new();
         let open_cb3 = open_file_rc.clone();

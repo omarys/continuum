@@ -27,11 +27,10 @@ pub fn create_chapter_banner(chapter_title: &str, page_count: usize) -> GtkBox {
 
     let label_box = GtkBox::new(Orientation::Vertical, 2);
 
-    // Present clean filename stem if full path is passed
     let clean_title = Path::new(chapter_title)
         .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or(chapter_title);
+        .unwrap_or_default()
+        .to_string_lossy();
 
     let title_label = Label::builder()
         .label(clean_title)
