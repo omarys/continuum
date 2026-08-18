@@ -33,6 +33,7 @@ pub struct ContinuumEngine {
     pub current_chapter_idx: qt_property!(i32; NOTIFY current_chapter_idx_changed),
     pub total_chapters_count: qt_property!(i32; NOTIFY total_chapters_count_changed),
     pub loaded_chapters_count: qt_property!(i32; NOTIFY loaded_chapters_count_changed),
+    pub initial_page_idx: qt_property!(i32; NOTIFY initial_page_idx_changed),
 
     // Signals
     pub has_comic_changed: qt_signal!(),
@@ -45,6 +46,8 @@ pub struct ContinuumEngine {
     pub current_chapter_idx_changed: qt_signal!(),
     pub total_chapters_count_changed: qt_signal!(),
     pub loaded_chapters_count_changed: qt_signal!(),
+    pub initial_page_idx_changed: qt_signal!(),
+    pub jump_to_initial_page_requested: qt_signal!(page_idx: i32),
     pub page_loaded: qt_signal!(chapter_idx: i32, page_idx: i32),
 
     pub app_icon: qt_property!(QString; READ get_app_icon),
@@ -69,6 +72,7 @@ pub struct ContinuumEngine {
     pub jump_to_chapter: qt_method!(fn(&mut self, series_idx: i32) -> bool),
 
     // Rust Internal State
+    pub tui_mode: bool,
     pub memory_manager: Arc<Mutex<MemoryManager>>,
     series: Arc<Mutex<Option<DirectorySeries>>>,
     chapters: Arc<Mutex<Vec<ChapterInfo>>>,
@@ -79,6 +83,7 @@ pub struct ContinuumEngine {
     first_loaded_series_idx: Arc<Mutex<usize>>,
     last_loaded_series_idx: Arc<Mutex<usize>>,
     next_chapter_id: Arc<Mutex<usize>>,
+    completed_chapters: Arc<Mutex<HashSet<usize>>>,
 }
 
 fn percent_decode(s: &str) -> String {
@@ -120,6 +125,7 @@ impl ContinuumEngine {
             current_chapter_idx: 0,
             total_chapters_count: 0,
             loaded_chapters_count: 0,
+            initial_page_idx: 0,
 
             has_comic_changed: Default::default(),
             comic_title_changed: Default::default(),
@@ -131,6 +137,8 @@ impl ContinuumEngine {
             current_chapter_idx_changed: Default::default(),
             total_chapters_count_changed: Default::default(),
             loaded_chapters_count_changed: Default::default(),
+            initial_page_idx_changed: Default::default(),
+            jump_to_initial_page_requested: Default::default(),
             page_loaded: Default::default(),
 
             app_icon: Default::default(),
@@ -153,6 +161,7 @@ impl ContinuumEngine {
             prev_chapter: Default::default(),
             jump_to_chapter: Default::default(),
 
+            tui_mode: false,
             memory_manager,
             series: Arc::new(Mutex::new(None)),
             chapters: Arc::new(Mutex::new(Vec::new())),
@@ -163,10 +172,19 @@ impl ContinuumEngine {
             first_loaded_series_idx: Arc::new(Mutex::new(0)),
             last_loaded_series_idx: Arc::new(Mutex::new(0)),
             next_chapter_id: Arc::new(Mutex::new(0)),
+            completed_chapters: Arc::new(Mutex::new(HashSet::new())),
         }
     }
 
+    pub fn set_tui_mode(&mut self, enabled: bool) {
+        self.tui_mode = enabled;
+    }
+
     pub fn open_file(&mut self, file_path_qstr: QString) -> bool {
+        self.open_file_with_page(file_path_qstr, 1)
+    }
+
+    pub fn open_file_with_page(&mut self, file_path_qstr: QString, initial_page: i64) -> bool {
         let mut raw_path = file_path_qstr.to_string();
         if raw_path.starts_with("file://") {
             raw_path = raw_path[7..].to_string();
@@ -183,10 +201,14 @@ impl ContinuumEngine {
             return false;
         }
 
-        self.open_file_path(&file_path)
+        self.open_file_path_with_page(&file_path, initial_page)
     }
 
     fn open_file_path(&mut self, file_path: &Path) -> bool {
+        self.open_file_path_with_page(file_path, 1)
+    }
+
+    pub fn open_file_path_with_page(&mut self, file_path: &Path, initial_page: i64) -> bool {
         let series = DirectorySeries::new(file_path);
         let archive = match CbzArchive::open(file_path) {
             Ok(a) => Arc::new(a),
@@ -214,6 +236,9 @@ impl ContinuumEngine {
         if let Ok(mut inflight) = self.in_flight.lock() {
             inflight.clear();
         }
+        if let Ok(mut completed) = self.completed_chapters.lock() {
+            completed.clear();
+        }
 
         let initial_idx = series.current_index;
         *self.first_loaded_series_idx.lock().unwrap() = initial_idx;
@@ -227,6 +252,13 @@ impl ContinuumEngine {
 
         self.append_archive(archive, initial_idx);
 
+        let target_page_idx = if initial_page > 1 {
+            ((initial_page - 1) as usize).min(page_count.saturating_sub(1)) as i32
+        } else {
+            0
+        };
+        self.initial_page_idx = target_page_idx;
+
         self.has_comic = true;
         self.comic_title = QString::from(title_name.as_str());
         self.current_chapter_name = QString::from(title_name.as_str());
@@ -236,7 +268,7 @@ impl ContinuumEngine {
 
         let total_pages = self.global_to_key.lock().unwrap().len() as i32;
         self.total_pages_count = total_pages;
-        self.current_page_number = 1;
+        self.current_page_number = target_page_idx + 1;
         self.current_chapter_page_count = page_count as i32;
 
         self.has_comic_changed();
@@ -246,10 +278,16 @@ impl ContinuumEngine {
         self.total_chapters_count_changed();
         self.loaded_chapters_count_changed();
         self.total_pages_count_changed();
+        self.initial_page_idx_changed();
         self.current_page_number_changed();
         self.current_chapter_page_count_changed();
+        self.jump_to_initial_page_requested(target_page_idx);
 
-        self.request_pages_around(0);
+        self.request_pages_around(target_page_idx);
+
+        if page_count > 0 && target_page_idx as usize + 1 >= page_count {
+            self.check_chapter_completion(0, target_page_idx as usize, page_count);
+        }
 
         true
     }
@@ -440,36 +478,47 @@ impl ContinuumEngine {
             return;
         }
         let g_idx = global_idx as usize;
-        let keys = match self.global_to_key.lock() {
-            Ok(k) => k,
-            Err(_) => return,
-        };
-        if let Some(key) = keys.get(g_idx) {
+        let info = {
+            let keys = match self.global_to_key.lock() {
+                Ok(k) => k,
+                Err(_) => return,
+            };
+            let key = match keys.get(g_idx) {
+                Some(k) => k.clone(),
+                None => return,
+            };
             let chaps = match self.chapters.lock() {
                 Ok(c) => c,
                 Err(_) => return,
             };
-            if let Some(chap) = chaps.get(key.chapter_idx) {
-                let new_chap_idx = (chap.series_idx + 1) as i32;
-                let new_page_num = (key.page_idx + 1) as i32;
-                let new_page_count = chap.page_count as i32;
+            let chap = match chaps.get(key.chapter_idx) {
+                Some(c) => c.clone(),
+                None => return,
+            };
+            (key, chap)
+        };
 
-                if self.current_chapter_idx != new_chap_idx {
-                    self.current_chapter_idx = new_chap_idx;
-                    self.current_chapter_idx_changed();
-                    self.current_chapter_name = QString::from(chap.filename.as_str());
-                    self.current_chapter_name_changed();
-                }
-                if self.current_page_number != new_page_num {
-                    self.current_page_number = new_page_num;
-                    self.current_page_number_changed();
-                }
-                if self.current_chapter_page_count != new_page_count {
-                    self.current_chapter_page_count = new_page_count;
-                    self.current_chapter_page_count_changed();
-                }
-            }
+        let (key, chap) = info;
+        let new_chap_idx = (chap.series_idx + 1) as i32;
+        let new_page_num = (key.page_idx + 1) as i32;
+        let new_page_count = chap.page_count as i32;
+
+        if self.current_chapter_idx != new_chap_idx {
+            self.current_chapter_idx = new_chap_idx;
+            self.current_chapter_idx_changed();
+            self.current_chapter_name = QString::from(chap.filename.as_str());
+            self.current_chapter_name_changed();
         }
+        if self.current_page_number != new_page_num {
+            self.current_page_number = new_page_num;
+            self.current_page_number_changed();
+        }
+        if self.current_chapter_page_count != new_page_count {
+            self.current_chapter_page_count = new_page_count;
+            self.current_chapter_page_count_changed();
+        }
+
+        self.check_chapter_completion(key.chapter_idx, key.page_idx, chap.page_count);
     }
 
     pub fn next_chapter(&mut self) -> bool {
@@ -564,5 +613,110 @@ impl ContinuumEngine {
         });
 
         *self.last_loaded_series_idx.lock().unwrap() = series_idx;
+    }
+
+    fn check_chapter_completion(
+        &mut self,
+        current_internal_chap_idx: usize,
+        page_idx: usize,
+        total_pages: usize,
+    ) {
+        let chaps = match self.chapters.lock() {
+            Ok(c) => c.clone(),
+            Err(_) => return,
+        };
+
+        // 1. Any chapter before the current one in the continuous stream was completed
+        for chap in chaps.iter() {
+            if chap.chapter_id < current_internal_chap_idx {
+                self.notify_chapter_completed(chap);
+            }
+        }
+
+        // 2. If user is at or past the last page of the current chapter
+        if total_pages > 0 && page_idx + 1 >= total_pages {
+            if let Some(chap) = chaps
+                .iter()
+                .find(|c| c.chapter_id == current_internal_chap_idx)
+            {
+                self.notify_chapter_completed(chap);
+            }
+        }
+    }
+
+    fn notify_chapter_completed(&mut self, chap: &ChapterInfo) {
+        let mut completed_set = self.completed_chapters.lock().unwrap();
+        if completed_set.insert(chap.series_idx) && self.tui_mode {
+            let msg = serde_json::json!({
+                "event": "chapter_completed",
+                "chapter_idx": (chap.series_idx + 1) as i64,
+                "chapter_number": (chap.series_idx + 1) as f64,
+                "chapter_name": chap.filename,
+                "file_path": chap.archive_path.to_string_lossy(),
+                "page_count": chap.page_count,
+                "completed": true
+            });
+            println!("{}", msg);
+            use std::io::Write;
+            let _ = std::io::stdout().flush();
+        }
+    }
+
+    pub fn is_current_chapter_completed(&self) -> bool {
+        let chaps = self.chapters.lock().unwrap();
+        if self.current_chapter_idx > 0 {
+            let series_idx = (self.current_chapter_idx - 1) as usize;
+            if self
+                .completed_chapters
+                .lock()
+                .unwrap()
+                .contains(&series_idx)
+            {
+                return true;
+            }
+            if let Some(chap) = chaps.iter().find(|c| c.series_idx == series_idx) {
+                if chap.page_count > 0 && self.current_page_number as usize >= chap.page_count {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    pub fn emit_exit_payload(&self) {
+        if !self.tui_mode {
+            return;
+        }
+
+        let chaps = self.chapters.lock().unwrap();
+        let current_chap = if self.current_chapter_idx > 0 {
+            let series_idx = (self.current_chapter_idx - 1) as usize;
+            chaps.iter().find(|c| c.series_idx == series_idx).cloned()
+        } else {
+            chaps.first().cloned()
+        };
+
+        let is_completed = self.is_current_chapter_completed();
+        let last_page = self.current_page_number as i64;
+        let file_path = current_chap
+            .as_ref()
+            .map(|c| c.archive_path.to_string_lossy().to_string())
+            .unwrap_or_default();
+        let chapter_name = current_chap
+            .as_ref()
+            .map(|c| c.filename.clone())
+            .unwrap_or_default();
+
+        let exit_payload = serde_json::json!({
+            "last_page": last_page,
+            "completed": is_completed,
+            "chapter_idx": self.current_chapter_idx,
+            "chapter_name": chapter_name,
+            "file_path": file_path
+        });
+
+        println!("{}", exit_payload);
+        use std::io::Write;
+        let _ = std::io::stdout().flush();
     }
 }

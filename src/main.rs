@@ -5,12 +5,13 @@ extern crate cpp;
 
 mod cache;
 mod cbz;
+mod cli;
 mod ui;
 
 use cache::MemoryManager;
+use cli::CliOptions;
 use qmetaobject::*;
 use std::env;
-use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use ui::ContinuumEngine;
 
@@ -34,6 +35,8 @@ qrc!(init_resources,
 fn main() {
     init_resources();
 
+    let opts = CliOptions::parse_from_args(env::args().skip(1));
+
     // Set Qt Application Name and Organization for Breeze / KDE Plasma integration
     env::set_var("QT_QUICK_CONTROLS_STYLE", "org.kde.desktop");
 
@@ -42,6 +45,10 @@ fn main() {
     let memory_manager = Arc::new(Mutex::new(MemoryManager::new()));
     let continuum_engine = QObjectBox::new(ContinuumEngine::new(memory_manager.clone()));
     let archives = continuum_engine.pinned().borrow().archives.clone();
+
+    if opts.tui_mode {
+        continuum_engine.pinned().borrow_mut().set_tui_mode(true);
+    }
 
     let mut qml_engine = QmlEngine::new();
 
@@ -56,15 +63,14 @@ fn main() {
 
     ui::register_image_provider(&qml_engine, memory_manager, archives);
 
-    let args: Vec<String> = env::args().collect();
-    if args.len() > 1 {
-        let path = PathBuf::from(&args[1]);
+    if let Some(path) = opts.file {
         if path.exists() {
             let path_str = path.to_string_lossy().to_string();
+            let initial_page = opts.page.unwrap_or(1);
             continuum_engine
                 .pinned()
                 .borrow_mut()
-                .open_file(QString::from(path_str.as_str()));
+                .open_file_with_page(QString::from(path_str.as_str()), initial_page);
         }
     }
 
@@ -73,4 +79,6 @@ fn main() {
     qml_engine.load_file(QString::from("qrc:/qml/main.qml"));
 
     qml_engine.exec();
+
+    continuum_engine.pinned().borrow().emit_exit_payload();
 }

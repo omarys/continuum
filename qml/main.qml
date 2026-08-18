@@ -130,6 +130,19 @@ Kirigami.ApplicationWindow {
         onToggleFullscreenRequested: root.toggleFullscreen()
     }
 
+    Connections {
+        target: engine
+        function onJumpToInitialPageRequested(pageIdx) {
+            readerView.jumpToPage(pageIdx);
+        }
+    }
+
+    Component.onCompleted: {
+        if (engine.has_comic && engine.initial_page_idx > 0) {
+            readerView.jumpToPage(engine.initial_page_idx);
+        }
+    }
+
     // Keyboard Shortcuts Sheet
     ShortcutsSheet {
         id: shortcutsSheet
