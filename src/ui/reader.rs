@@ -11,7 +11,7 @@ use std::time::Duration;
 use crossbeam_channel::{unbounded, Receiver, Sender};
 
 use crate::cache::{MemoryManager, PageKey};
-use crate::cbz::{CbzArchive, DecodedImagePayload, DirectorySeries};
+use crate::cbz::{CbzArchive, DecodedImagePayload, DirectorySeries, MAX_PAGE_FILE_SIZE};
 use crate::ui::chapter_banner::create_chapter_banner;
 use crate::ui::page_widget::{PageWidget, ReadingMode};
 
@@ -44,10 +44,11 @@ pub struct ReaderView {
     pub target_x: Rc<RefCell<Option<f64>>>,
     pub is_animating: Rc<RefCell<bool>>,
     pub reading_mode: Rc<RefCell<ReadingMode>>,
+    pub generation_id: Rc<RefCell<usize>>,
 
     // Channels
-    pub tx: Sender<(PageKey, Option<DecodedImagePayload>)>,
-    pub rx: Receiver<(PageKey, Option<DecodedImagePayload>)>,
+    pub tx: Sender<(PageKey, usize, Option<DecodedImagePayload>)>,
+    pub rx: Receiver<(PageKey, usize, Option<DecodedImagePayload>)>,
 }
 
 impl ReaderView {
@@ -109,8 +110,9 @@ impl ReaderView {
         let target_x = Rc::new(RefCell::new(None));
         let is_animating = Rc::new(RefCell::new(false));
         let reading_mode = Rc::new(RefCell::new(ReadingMode::ContinuousVertical));
+        let generation_id = Rc::new(RefCell::new(0));
 
-        let (tx, rx) = unbounded::<(PageKey, Option<DecodedImagePayload>)>();
+        let (tx, rx) = unbounded::<(PageKey, usize, Option<DecodedImagePayload>)>();
 
         let reader = Self {
             container,
@@ -132,6 +134,7 @@ impl ReaderView {
             target_x,
             is_animating,
             reading_mode,
+            generation_id,
             tx,
             rx,
         };
@@ -279,6 +282,7 @@ impl ReaderView {
         let chapters = self.chapters.clone();
         let in_flight = self.in_flight.clone();
         let tx = self.tx.clone();
+        let generation_id = self.generation_id.clone();
 
         let is_jumping_to_bottom = dest_y >= max_scroll - 10.0;
 
@@ -305,6 +309,7 @@ impl ReaderView {
                     let prog = (cur / max_s).clamp(0.0, 1.0);
                     ((prog * (total_global as f64)) as usize).min(total_global.saturating_sub(1))
                 };
+                let gen = *generation_id.borrow();
                 Self::dispatch_requests_around(
                     current_global_idx,
                     &global_to_key,
@@ -312,6 +317,7 @@ impl ReaderView {
                     &chapters,
                     &in_flight,
                     &tx,
+                    gen,
                 );
             }
 
@@ -752,10 +758,19 @@ impl ReaderView {
         let memory_manager_rx = memory_manager.clone();
         let in_flight_rx = in_flight.clone();
         let vadj_rx = vadjustment.clone();
+        let generation_id_rx = self.generation_id.clone();
 
         glib::timeout_add_local(Duration::from_millis(16), move || {
-            while let Ok((key, maybe_payload)) = rx.try_recv() {
+            let mut uploads_this_tick = 0;
+            const MAX_UPLOADS_PER_TICK: usize = 3;
+
+            while let Ok((key, gen, maybe_payload)) = rx.try_recv() {
                 in_flight_rx.borrow_mut().remove(&key);
+
+                // Discard stale background worker results from previous generations/comics
+                if gen != *generation_id_rx.borrow() {
+                    continue;
+                }
 
                 if let Some(payload) = maybe_payload {
                     match CbzArchive::create_texture(
@@ -809,6 +824,11 @@ impl ReaderView {
                     }
                 } else if let Some(pw) = page_widgets_rx.borrow().get(&key) {
                     pw.set_unloaded();
+                }
+
+                uploads_this_tick += 1;
+                if uploads_this_tick >= MAX_UPLOADS_PER_TICK {
+                    break;
                 }
             }
             glib::ControlFlow::Continue
@@ -868,6 +888,7 @@ impl ReaderView {
                 ((progress * (total_global as f64)) as usize).min(total_global.saturating_sub(1))
             };
 
+            let gen = *reader_c.generation_id.borrow();
             Self::dispatch_requests_around(
                 current_global_idx,
                 &global_to_key,
@@ -875,11 +896,13 @@ impl ReaderView {
                 &chapters,
                 &in_flight,
                 &tx,
+                gen,
             );
         });
     }
 
     pub fn request_pages_around(&self, current_global_idx: usize) {
+        let gen = *self.generation_id.borrow();
         Self::dispatch_requests_around(
             current_global_idx,
             &self.global_to_key,
@@ -887,6 +910,7 @@ impl ReaderView {
             &self.chapters,
             &self.in_flight,
             &self.tx,
+            gen,
         );
     }
 
@@ -896,7 +920,8 @@ impl ReaderView {
         page_widgets: &Rc<RefCell<HashMap<PageKey, PageWidget>>>,
         chapters: &Rc<RefCell<Vec<ChapterState>>>,
         in_flight: &Rc<RefCell<HashSet<PageKey>>>,
-        tx: &Sender<(PageKey, Option<DecodedImagePayload>)>,
+        tx: &Sender<(PageKey, usize, Option<DecodedImagePayload>)>,
+        generation_id: usize,
     ) {
         let total_global = global_to_key.borrow().len();
         if total_global == 0 {
@@ -915,7 +940,13 @@ impl ReaderView {
 
         priority_keys.sort_by_key(|(idx, _)| idx.abs_diff(current_global_idx));
 
+        const MAX_CONCURRENT_IN_FLIGHT: usize = 8;
+
         for (_g_idx, key) in priority_keys {
+            if in_flight.borrow().len() >= MAX_CONCURRENT_IN_FLIGHT {
+                break;
+            }
+
             let is_loaded = {
                 let map = page_widgets.borrow();
                 map.get(&key)
@@ -950,6 +981,7 @@ impl ReaderView {
                 if let Some((path, entry_name)) = archive_info {
                     let tx_c = tx.clone();
                     let key_c = key.clone();
+                    let gen_c = generation_id;
 
                     rayon::spawn(move || {
                         let res = (|| -> Result<(u32, u32, Vec<u8>), String> {
@@ -959,9 +991,33 @@ impl ReaderView {
                                 zip::ZipArchive::new(reader).map_err(|e| e.to_string())?;
                             let mut entry = zip.by_name(&entry_name).map_err(|e| e.to_string())?;
 
-                            let mut buf = Vec::with_capacity(entry.size() as usize);
-                            std::io::Read::read_to_end(&mut entry, &mut buf)
+                            // Reject spoofed header sizes
+                            if entry.size() > MAX_PAGE_FILE_SIZE {
+                                return Err(format!(
+                                    "Entry '{}' declares size exceeding limit ({} > {} bytes)",
+                                    entry_name,
+                                    entry.size(),
+                                    MAX_PAGE_FILE_SIZE
+                                ));
+                            }
+
+                            // Bound initial capacity allocation
+                            let initial_cap =
+                                (entry.size() as usize).min(MAX_PAGE_FILE_SIZE as usize);
+                            let mut buf = Vec::with_capacity(initial_cap);
+
+                            // Bound decompression stream to prevent zip-bomb expansion
+                            let mut limited_reader =
+                                std::io::Read::take(&mut entry, MAX_PAGE_FILE_SIZE + 1);
+                            std::io::Read::read_to_end(&mut limited_reader, &mut buf)
                                 .map_err(|e| e.to_string())?;
+
+                            if buf.len() as u64 > MAX_PAGE_FILE_SIZE {
+                                return Err(format!(
+                                    "Entry '{}' decompressed beyond maximum limit ({} bytes)",
+                                    entry_name, MAX_PAGE_FILE_SIZE
+                                ));
+                            }
 
                             CbzArchive::decode_page_bytes(&buf)
                         })();
@@ -987,7 +1043,7 @@ impl ReaderView {
                             }
                         };
 
-                        let _ = tx_c.send((key_c, payload));
+                        let _ = tx_c.send((key_c, gen_c, payload));
                     });
                 } else {
                     in_flight.borrow_mut().remove(&key);
@@ -1011,6 +1067,7 @@ impl ReaderView {
         self.global_to_key.borrow_mut().clear();
         self.memory_manager.borrow_mut().clear();
         self.in_flight.borrow_mut().clear();
+        *self.generation_id.borrow_mut() += 1;
         *self.first_loaded_series_idx.borrow_mut() = 0;
         *self.last_loaded_series_idx.borrow_mut() = 0;
         *self.next_chapter_id.borrow_mut() = 0;

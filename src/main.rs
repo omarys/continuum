@@ -34,6 +34,11 @@ fn main() -> glib::ExitCode {
 }
 
 fn open_window(app: &libadwaita::Application, path: Option<PathBuf>) {
+    if let Some(active_win) = app.active_window() {
+        active_win.present();
+        return;
+    }
+
     let manhwa_window = ManhwaWindow::new(app);
     if let Some(p) = path.filter(|p| p.exists()) {
         let _ = manhwa_window.reader.load_initial_file(p);
@@ -113,11 +118,6 @@ fn load_custom_styles() {
             &provider,
             gtk4::STYLE_PROVIDER_PRIORITY_APPLICATION,
         );
-
-        let icon_theme = gtk4::IconTheme::for_display(&display);
-        if let Ok(cwd) = env::current_dir() {
-            icon_theme.add_search_path(&cwd);
-        }
 
         gtk4::Window::set_default_icon_name("dev.continuum.ManhwaReader");
     }
