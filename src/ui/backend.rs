@@ -1,7 +1,7 @@
 #![allow(clippy::useless_transmute)]
 
 use crate::cache::{MemoryManager, PageKey};
-use crate::cbz::archive::{CbzArchive, DirectorySeries};
+use crate::cbz::archive::{CbzArchive, DirectorySeries, MAX_PAGE_FILE_SIZE};
 use qmetaobject::*;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -84,6 +84,7 @@ pub struct ContinuumEngine {
     last_loaded_series_idx: Arc<Mutex<usize>>,
     next_chapter_id: Arc<Mutex<usize>>,
     completed_chapters: Arc<Mutex<HashSet<usize>>>,
+    generation_id: Arc<Mutex<usize>>,
 }
 
 fn percent_decode(s: &str) -> String {
@@ -173,6 +174,7 @@ impl ContinuumEngine {
             last_loaded_series_idx: Arc::new(Mutex::new(0)),
             next_chapter_id: Arc::new(Mutex::new(0)),
             completed_chapters: Arc::new(Mutex::new(HashSet::new())),
+            generation_id: Arc::new(Mutex::new(0)),
         }
     }
 
@@ -239,6 +241,7 @@ impl ContinuumEngine {
         if let Ok(mut completed) = self.completed_chapters.lock() {
             completed.clear();
         }
+        *self.generation_id.lock().unwrap() += 1;
 
         let initial_idx = series.current_index;
         *self.first_loaded_series_idx.lock().unwrap() = initial_idx;
@@ -318,12 +321,20 @@ impl ContinuumEngine {
             self.next_chapter();
         }
 
+        const MAX_CONCURRENT_IN_FLIGHT: usize = 8;
+
         let archives = self.archives.lock().unwrap().clone();
         let memory_manager = self.memory_manager.clone();
         let in_flight = self.in_flight.clone();
         let key_to_global = self.key_to_global.clone();
+        let generation_id = self.generation_id.clone();
+        let current_gen = *generation_id.lock().unwrap();
 
         for (idx, key) in global_keys.iter().enumerate().take(end).skip(start) {
+            if in_flight.lock().unwrap().len() >= MAX_CONCURRENT_IN_FLIGHT {
+                break;
+            }
+
             if let Ok(mem) = memory_manager.lock() {
                 if mem.contains(key) {
                     continue;
@@ -342,6 +353,8 @@ impl ContinuumEngine {
                 let memory_manager_clone = memory_manager.clone();
                 let in_flight_clone = in_flight.clone();
                 let key_to_global_clone = key_to_global.clone();
+                let generation_id_clone = generation_id.clone();
+                let task_gen = current_gen;
 
                 rayon::spawn(move || {
                     if key_clone.page_idx < archive_clone.image_entries.len() {
@@ -350,22 +363,44 @@ impl ContinuumEngine {
                             let reader = std::io::BufReader::new(file);
                             if let Ok(mut zip) = zip::ZipArchive::new(reader) {
                                 if let Ok(mut entry) = zip.by_name(inner_name) {
-                                    let mut bytes = Vec::new();
-                                    if std::io::Read::read_to_end(&mut entry, &mut bytes).is_ok() {
-                                        if let Ok((w, h, rgba)) =
-                                            CbzArchive::decode_page_bytes(&bytes)
+                                    // Reject spoofed header sizes
+                                    if entry.size() <= MAX_PAGE_FILE_SIZE {
+                                        let initial_cap = (entry.size() as usize)
+                                            .min(MAX_PAGE_FILE_SIZE as usize);
+                                        let mut bytes = Vec::with_capacity(initial_cap);
+                                        let mut limited_reader =
+                                            std::io::Read::take(&mut entry, MAX_PAGE_FILE_SIZE + 1);
+                                        if std::io::Read::read_to_end(
+                                            &mut limited_reader,
+                                            &mut bytes,
+                                        )
+                                        .is_ok()
+                                            && bytes.len() as u64 <= MAX_PAGE_FILE_SIZE
                                         {
-                                            if let Ok(page_data) =
-                                                CbzArchive::create_page_data(w, h, rgba)
+                                            if let Ok((w, h, rgba)) =
+                                                CbzArchive::decode_page_bytes(&bytes)
                                             {
-                                                if let Ok(mut mem) = memory_manager_clone.lock() {
-                                                    let map = key_to_global_clone.lock().unwrap();
-                                                    mem.insert(
-                                                        key_clone.clone(),
-                                                        page_data,
-                                                        idx,
-                                                        &|k| map.get(k).copied().unwrap_or(0),
-                                                    );
+                                                if let Ok(page_data) =
+                                                    CbzArchive::create_page_data(w, h, rgba)
+                                                {
+                                                    if task_gen
+                                                        == *generation_id_clone.lock().unwrap()
+                                                    {
+                                                        if let Ok(mut mem) =
+                                                            memory_manager_clone.lock()
+                                                        {
+                                                            let map =
+                                                                key_to_global_clone.lock().unwrap();
+                                                            mem.insert(
+                                                                key_clone.clone(),
+                                                                page_data,
+                                                                idx,
+                                                                &|k| {
+                                                                    map.get(k).copied().unwrap_or(0)
+                                                                },
+                                                            );
+                                                        }
+                                                    }
                                                 }
                                             }
                                         }

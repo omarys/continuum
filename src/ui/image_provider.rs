@@ -1,5 +1,5 @@
 use crate::cache::{MemoryManager, PageKey};
-use crate::cbz::archive::CbzArchive;
+use crate::cbz::archive::{CbzArchive, MAX_PAGE_FILE_SIZE};
 use cpp::cpp;
 use qmetaobject::*;
 use std::collections::HashMap;
@@ -54,7 +54,7 @@ pub fn get_page_qimage(
         }
     }
 
-    // 2. Fallback: decode directly from archive
+    // 2. Fallback: decode directly from archive with zip-bomb mitigation
     unsafe {
         if let Some(ref archs_arc) = GLOBAL_ARCHIVES {
             if let Ok(archs) = archs_arc.lock() {
@@ -65,30 +65,44 @@ pub fn get_page_qimage(
                             let reader = std::io::BufReader::new(file);
                             if let Ok(mut zip) = zip::ZipArchive::new(reader) {
                                 if let Ok(mut entry) = zip.by_name(inner_name) {
-                                    let mut bytes = Vec::new();
-                                    if std::io::Read::read_to_end(&mut entry, &mut bytes).is_ok() {
-                                        if let Ok((w, h, rgba)) =
-                                            CbzArchive::decode_page_bytes(&bytes)
+                                    // Reject spoofed header sizes
+                                    if entry.size() <= MAX_PAGE_FILE_SIZE {
+                                        let initial_cap = (entry.size() as usize)
+                                            .min(MAX_PAGE_FILE_SIZE as usize);
+                                        let mut bytes = Vec::with_capacity(initial_cap);
+                                        let mut limited_reader =
+                                            std::io::Read::take(&mut entry, MAX_PAGE_FILE_SIZE + 1);
+                                        if std::io::Read::read_to_end(
+                                            &mut limited_reader,
+                                            &mut bytes,
+                                        )
+                                        .is_ok()
+                                            && bytes.len() as u64 <= MAX_PAGE_FILE_SIZE
                                         {
-                                            if let Ok(page_data) =
-                                                CbzArchive::create_page_data(w, h, rgba)
+                                            if let Ok((w, h, rgba)) =
+                                                CbzArchive::decode_page_bytes(&bytes)
                                             {
-                                                *out_width = page_data.width as i32;
-                                                *out_height = page_data.height as i32;
-                                                let ptr = page_data.rgba_bytes.as_ptr();
-                                                let pw = page_data.width as i32;
-                                                let ph = page_data.height as i32;
+                                                if let Ok(page_data) =
+                                                    CbzArchive::create_page_data(w, h, rgba)
+                                                {
+                                                    *out_width = page_data.width as i32;
+                                                    *out_height = page_data.height as i32;
+                                                    let ptr = page_data.rgba_bytes.as_ptr();
+                                                    let pw = page_data.width as i32;
+                                                    let ph = page_data.height as i32;
 
-                                                let qimg = cpp!(unsafe [ptr as "const uint8_t*", pw as "int", ph as "int"] -> QImage as "QImage" {
-                                                    return QImage((const uchar*)ptr, pw, ph, (qsizetype)pw * 4, QImage::Format_RGBA8888).copy();
-                                                });
+                                                    let qimg = cpp!(unsafe [ptr as "const uint8_t*", pw as "int", ph as "int"] -> QImage as "QImage" {
+                                                        return QImage((const uchar*)ptr, pw, ph, (qsizetype)pw * 4, QImage::Format_RGBA8888).copy();
+                                                    });
 
-                                                if let Some(ref mem_arc) = GLOBAL_MEMORY_MANAGER {
-                                                    if let Ok(mut mem) = mem_arc.lock() {
-                                                        mem.insert(key, page_data, 0, &|_| 0);
+                                                    if let Some(ref mem_arc) = GLOBAL_MEMORY_MANAGER
+                                                    {
+                                                        if let Ok(mut mem) = mem_arc.lock() {
+                                                            mem.insert(key, page_data, 0, &|_| 0);
+                                                        }
                                                     }
+                                                    return qimg;
                                                 }
-                                                return qimg;
                                             }
                                         }
                                     }

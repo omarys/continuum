@@ -30,7 +30,6 @@ impl MemoryManager {
         Self::default()
     }
 
-<<<<<<< HEAD
     #[allow(dead_code)]
     pub fn total_bytes(&self) -> usize {
         self.total_bytes
@@ -55,35 +54,6 @@ impl MemoryManager {
         self.entries.contains_key(key)
     }
 
-||||||| 4b8bf32
-    #[allow(dead_code)]
-    pub fn total_bytes(&self) -> usize {
-        self.total_bytes
-    }
-
-    #[allow(dead_code)]
-    pub fn loaded_count(&self) -> usize {
-        self.entries.len()
-    }
-
-    #[allow(dead_code)]
-    pub fn get(&mut self, key: &PageKey) -> Option<Texture> {
-        if let Some(entry) = self.entries.get_mut(key) {
-            self.access_counter += 1;
-            entry.last_accessed_idx = self.access_counter;
-            Some(entry.texture.clone())
-        } else {
-            None
-        }
-    }
-
-    #[allow(dead_code)]
-    pub fn contains(&self, key: &PageKey) -> bool {
-        self.entries.contains_key(key)
-    }
-
-=======
->>>>>>> b37efd4b3e516a765036ba7a99a0eb027855edc2
     pub fn insert(
         &mut self,
         key: PageKey,
@@ -149,7 +119,6 @@ impl MemoryManager {
         evicted_keys
     }
 
-<<<<<<< HEAD
     #[allow(dead_code)]
     pub fn remove(&mut self, key: &PageKey) {
         if let Some(entry) = self.entries.remove(key) {
@@ -157,16 +126,6 @@ impl MemoryManager {
         }
     }
 
-||||||| 4b8bf32
-    #[allow(dead_code)]
-    pub fn remove(&mut self, key: &PageKey) {
-        if let Some(entry) = self.entries.remove(key) {
-            self.total_bytes = self.total_bytes.saturating_sub(entry.byte_size);
-        }
-    }
-
-=======
->>>>>>> b37efd4b3e516a765036ba7a99a0eb027855edc2
     pub fn clear(&mut self) {
         self.entries.clear();
         self.total_bytes = 0;

@@ -1,11 +1,3 @@
-<<<<<<< HEAD
-use crate::cache::PageKey;
-||||||| 4b8bf32
-use crate::cache::PageKey;
-use gdk4::Texture;
-=======
-use gdk4::Texture;
->>>>>>> b37efd4b3e516a765036ba7a99a0eb027855edc2
 use std::fs::File;
 use std::io::{BufReader, Cursor};
 use std::path::{Path, PathBuf};
@@ -37,6 +29,7 @@ pub struct LoadedPageData {
     pub byte_size: usize,
 }
 
+#[allow(dead_code)]
 pub struct DecodedImagePayload {
     pub width: u32,
     pub height: u32,
@@ -163,13 +156,7 @@ impl CbzArchive {
     }
 }
 
-<<<<<<< HEAD
-#[allow(dead_code)]
 #[derive(Clone, Debug)]
-||||||| 4b8bf32
-#[allow(dead_code)]
-=======
->>>>>>> b37efd4b3e516a765036ba7a99a0eb027855edc2
 pub struct DirectorySeries {
     pub dir_files: Vec<PathBuf>,
     pub current_index: usize,
