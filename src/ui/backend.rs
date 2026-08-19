@@ -629,7 +629,7 @@ impl ContinuumEngine {
         // 1. Any chapter before the current one in the continuous stream was completed
         for chap in chaps.iter() {
             if chap.chapter_id < current_internal_chap_idx {
-                self.notify_chapter_completed(chap);
+                self.mark_chapter_completed(chap);
             }
         }
 
@@ -639,27 +639,14 @@ impl ContinuumEngine {
                 .iter()
                 .find(|c| c.chapter_id == current_internal_chap_idx)
             {
-                self.notify_chapter_completed(chap);
+                self.mark_chapter_completed(chap);
             }
         }
     }
 
-    fn notify_chapter_completed(&mut self, chap: &ChapterInfo) {
+    fn mark_chapter_completed(&mut self, chap: &ChapterInfo) {
         let mut completed_set = self.completed_chapters.lock().unwrap();
-        if completed_set.insert(chap.series_idx) && self.tui_mode {
-            let msg = serde_json::json!({
-                "event": "chapter_completed",
-                "chapter_idx": (chap.series_idx + 1) as i64,
-                "chapter_number": (chap.series_idx + 1) as f64,
-                "chapter_name": chap.filename,
-                "file_path": chap.archive_path.to_string_lossy(),
-                "page_count": chap.page_count,
-                "completed": true
-            });
-            println!("{}", msg);
-            use std::io::Write;
-            let _ = std::io::stdout().flush();
-        }
+        completed_set.insert(chap.series_idx);
     }
 
     pub fn is_current_chapter_completed(&self) -> bool {
@@ -684,11 +671,14 @@ impl ContinuumEngine {
     }
 
     pub fn emit_exit_payload(&self) {
-        if !self.tui_mode {
+        let chaps = match self.chapters.lock() {
+            Ok(c) => c.clone(),
+            Err(_) => return,
+        };
+        if chaps.is_empty() && !self.has_comic {
             return;
         }
 
-        let chaps = self.chapters.lock().unwrap();
         let current_chap = if self.current_chapter_idx > 0 {
             let series_idx = (self.current_chapter_idx - 1) as usize;
             chaps.iter().find(|c| c.series_idx == series_idx).cloned()
@@ -707,9 +697,44 @@ impl ContinuumEngine {
             .map(|c| c.filename.clone())
             .unwrap_or_default();
 
+        let completed_set = self.completed_chapters.lock().unwrap();
+
+        let completed_chapters_paths: Vec<String> = chaps
+            .iter()
+            .filter(|c| {
+                completed_set.contains(&c.series_idx)
+                    || (is_completed
+                        && current_chap.as_ref().map(|cc| cc.series_idx) == Some(c.series_idx))
+            })
+            .map(|c| c.archive_path.to_string_lossy().to_string())
+            .collect();
+
+        let completed_filenames: Vec<String> = chaps
+            .iter()
+            .filter(|c| {
+                completed_set.contains(&c.series_idx)
+                    || (is_completed
+                        && current_chap.as_ref().map(|cc| cc.series_idx) == Some(c.series_idx))
+            })
+            .map(|c| c.filename.clone())
+            .collect();
+
+        let completed_indices: Vec<i64> = chaps
+            .iter()
+            .filter(|c| {
+                completed_set.contains(&c.series_idx)
+                    || (is_completed
+                        && current_chap.as_ref().map(|cc| cc.series_idx) == Some(c.series_idx))
+            })
+            .map(|c| (c.series_idx + 1) as i64)
+            .collect();
+
         let exit_payload = serde_json::json!({
             "last_page": last_page,
             "completed": is_completed,
+            "completed_chapters": completed_chapters_paths,
+            "completed_filenames": completed_filenames,
+            "completed_chapter_indices": completed_indices,
             "chapter_idx": self.current_chapter_idx,
             "chapter_name": chapter_name,
             "file_path": file_path
