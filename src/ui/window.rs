@@ -95,6 +95,18 @@ impl ManhwaWindow {
         });
 
         let window_struct = Self { window, reader };
+
+        // dewey integration contract: emit the exit payload (current page +
+        // completion) when the window closes, so the spawning process can
+        // persist reading progress.
+        let reader_rc = window_struct.reader.clone();
+        window_struct.window.connect_close_request(move |_| {
+            if let Some((page, completed)) = reader_rc.exit_payload() {
+                println!("{{\"last_page\": {}, \"completed\": {}}}", page, completed);
+            }
+            glib::Propagation::Proceed
+        });
+
         window_struct.setup_actions(open_btn);
         window_struct
     }
@@ -295,8 +307,8 @@ impl ManhwaWindow {
                 reader_key.smooth_scroll_by(-page_size * 0.5);
                 glib::Propagation::Stop
             } else if keyval == gdk4::Key::G {
-                // G (Shift+G): Jump to absolute bottom of last page image
-                reader_key.smooth_scroll_to(f64::MAX);
+                // G (Shift+G): Jump to bottom of the current chapter
+                reader_key.jump_to_current_chapter_bottom();
                 glib::Propagation::Stop
             } else if keyval == gdk4::Key::g {
                 let now = std::time::Instant::now();
