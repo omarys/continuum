@@ -2,7 +2,7 @@ use gtk4::prelude::*;
 use gtk4::{Align, Box as GtkBox, Button, Orientation, ScrolledWindow};
 use libadwaita::{Clamp, StatusPage};
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::rc::Rc;
@@ -19,6 +19,25 @@ pub struct ChapterState {
     pub chapter_id: usize,
     pub archive: CbzArchive,
     pub banner_widget: GtkBox,
+}
+
+/// Progress for one chapter as read in this session. Every number is local to
+/// its own archive — never a global page offset across chapters.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChapterProgressEntry {
+    pub file: String,
+    pub last_page: i64,
+    pub completed: bool,
+}
+
+/// The dewey integration payload emitted on window close. `chapters` enumerates
+/// every archive actually read; the legacy top-level fields mirror the first
+/// chapter for backward compatibility with older consumers.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExitPayload {
+    pub last_page: i64,
+    pub completed: bool,
+    pub chapters: Vec<ChapterProgressEntry>,
 }
 
 #[derive(Clone)]
@@ -284,11 +303,9 @@ impl ReaderView {
         let tx = self.tx.clone();
         let generation_id = self.generation_id.clone();
 
-        let is_jumping_to_bottom = dest_y >= max_scroll - 10.0;
-
         self.scrolled_window.add_tick_callback(move |_, _| {
             let cur = vadj.value();
-            let mut tgt = match *target_y.borrow() {
+            let tgt = match *target_y.borrow() {
                 Some(t) => t,
                 None => {
                     *is_animating.borrow_mut() = false;
@@ -319,12 +336,6 @@ impl ReaderView {
                     &tx,
                     gen,
                 );
-            }
-
-            // If jumping to bottom (G), dynamically track layout upper updates
-            if is_jumping_to_bottom {
-                tgt = (upr - psz).max(0.0);
-                *target_y.borrow_mut() = Some(tgt);
             }
 
             let diff = tgt - cur;
@@ -431,6 +442,220 @@ impl ReaderView {
                 closest_idx
             }
         }
+    }
+
+    /// Jumps to a 1-based page once the layout is available. `page 0/1` maps
+    /// to the top (already the default), so this is a no-op for them.
+    /// Clamped to the initially opened chapter's page count.
+    pub fn jump_to_page(&self, page: usize) {
+        let initial_page_count = self
+            .chapters
+            .borrow()
+            .first()
+            .map(|c| c.archive.page_count())
+            .unwrap_or_else(|| self.global_to_key.borrow().len());
+
+        if initial_page_count == 0 || page <= 1 {
+            return;
+        }
+
+        let clamped = page.min(initial_page_count);
+        let idx = (clamped - 1).min(initial_page_count.saturating_sub(1));
+
+        // If jumping to near or at the end of the initial chapter, also pre-load the next chapter
+        if clamped >= initial_page_count.saturating_sub(1) {
+            let last_idx = *self.last_loaded_series_idx.borrow();
+            if let Some(ref series) = *self.series.borrow() {
+                if last_idx + 1 < series.dir_files.len() {
+                    let next_idx = last_idx + 1;
+                    if let Ok(archive) = CbzArchive::open(&series.dir_files[next_idx]) {
+                        let _ = self.append_chapter(archive, next_idx);
+                    }
+                }
+            }
+        }
+
+        let reader = self.clone();
+        let attempts = Rc::new(Cell::new(0u8));
+        glib::idle_add_local(move || {
+            if reader.try_jump_to_idx(idx) || attempts.get() >= 120 {
+                glib::ControlFlow::Break
+            } else {
+                attempts.set(attempts.get() + 1);
+                glib::ControlFlow::Continue
+            }
+        });
+    }
+
+    /// One attempt at scrolling to the given global page index. Returns true
+    /// once widget bounds are computable (i.e. layout has happened).
+    fn try_jump_to_idx(&self, idx: usize) -> bool {
+        let key = match self.global_to_key.borrow().get(idx) {
+            Some(k) => k.clone(),
+            None => return true,
+        };
+        let pw = match self.page_widgets.borrow().get(&key) {
+            Some(p) => p.clone(),
+            None => return true,
+        };
+
+        match *self.reading_mode.borrow() {
+            ReadingMode::ContinuousVertical => {
+                if let Some(rect) = pw.container.compute_bounds(&self.content_box) {
+                    self.smooth_scroll_to(rect.y() as f64);
+                    true
+                } else {
+                    false
+                }
+            }
+            ReadingMode::ContinuousHorizontal => {
+                if let Some(rect) = pw.container.compute_bounds(&self.content_box) {
+                    let hadj = self.scrolled_window.hadjustment();
+                    let target_x =
+                        rect.x() as f64 + rect.width() as f64 / 2.0 - hadj.page_size() / 2.0;
+                    self.smooth_scroll_to_x(target_x);
+                    true
+                } else {
+                    false
+                }
+            }
+        }
+    }
+
+    /// Page under the viewport center, computed from real widget bounds
+    /// (exact per-page geometry), unlike the proportional estimate used by
+    /// `get_current_global_page_idx` for decode dispatch.
+    fn global_page_at_viewport_center(&self) -> usize {
+        let global_to_key = self.global_to_key.borrow();
+        let total = global_to_key.len();
+        if total == 0 {
+            return 0;
+        }
+        let widgets = self.page_widgets.borrow();
+        match *self.reading_mode.borrow() {
+            ReadingMode::ContinuousVertical => {
+                let vadj = self.scrolled_window.vadjustment();
+                let center = vadj.value() + vadj.page_size() / 2.0;
+                let mut closest = 0usize;
+                let mut best = f64::MAX;
+                for (i, key) in global_to_key.iter().enumerate() {
+                    if let Some(pw) = widgets.get(key) {
+                        if let Some(rect) = pw.container.compute_bounds(&self.content_box) {
+                            let top = rect.y() as f64;
+                            let bottom = top + rect.height() as f64;
+                            if center >= top && center < bottom {
+                                return i;
+                            }
+                            let dist = (center - (top + rect.height() as f64 / 2.0)).abs();
+                            if dist < best {
+                                best = dist;
+                                closest = i;
+                            }
+                        }
+                    }
+                }
+                closest
+            }
+            ReadingMode::ContinuousHorizontal => {
+                let hadj = self.scrolled_window.hadjustment();
+                let center_x = hadj.value() + hadj.page_size() / 2.0;
+                let mut closest = 0usize;
+                let mut best = f64::MAX;
+                for (i, key) in global_to_key.iter().enumerate() {
+                    if let Some(pw) = widgets.get(key) {
+                        if let Some(rect) = pw.container.compute_bounds(&self.content_box) {
+                            let left = rect.x() as f64;
+                            let right = left + rect.width() as f64;
+                            if center_x >= left && center_x < right {
+                                return i;
+                            }
+                            let dist = (center_x - (left + rect.width() as f64 / 2.0)).abs();
+                            if dist < best {
+                                best = dist;
+                                closest = i;
+                            }
+                        }
+                    }
+                }
+                closest
+            }
+        }
+    }
+
+    /// dewey integration contract: when a file was loaded, report the current
+    /// (1-based) page and whether the reader reached the last page so the
+    /// caller can persist progress / completion.
+    pub fn exit_payload(&self) -> Option<ExitPayload> {
+        let chapters = self.chapters.borrow();
+        if chapters.is_empty() {
+            return None;
+        }
+
+        let mut entries: Vec<ChapterProgressEntry> = Vec::new();
+        for chap in chapters.iter() {
+            let Some(reached) = self.chapter_last_page_reached(chap.chapter_id) else {
+                // Chapter auto-appended but never scrolled into view: no progress.
+                continue;
+            };
+            let (last_page, completed) =
+                Self::progress_from_reached(reached, chap.archive.page_count());
+            entries.push(ChapterProgressEntry {
+                file: chap.archive.path.to_string_lossy().to_string(),
+                last_page,
+                completed,
+            });
+        }
+
+        if entries.is_empty() {
+            return None;
+        }
+
+        let first = &entries[0];
+        Some(ExitPayload {
+            last_page: first.last_page,
+            completed: first.completed,
+            chapters: entries,
+        })
+    }
+
+    /// Largest page index of `chapter_id` whose page has scrolled into view
+    /// (page top/left at or above the viewport bottom/right edge). None when no
+    /// page of that chapter has been reached or bounds aren't laid out yet.
+    fn chapter_last_page_reached(&self, chapter_id: usize) -> Option<usize> {
+        let vadj = self.scrolled_window.vadjustment();
+        let hadj = self.scrolled_window.hadjustment();
+        let viewport_bottom = vadj.value() + vadj.page_size();
+        let viewport_right = hadj.value() + hadj.page_size();
+        let vertical = matches!(*self.reading_mode.borrow(), ReadingMode::ContinuousVertical);
+
+        let global_to_key = self.global_to_key.borrow();
+        let widgets = self.page_widgets.borrow();
+        let mut reached: Option<usize> = None;
+        for key in global_to_key.iter() {
+            if key.chapter_idx != chapter_id {
+                continue;
+            }
+            let Some(pw) = widgets.get(key) else { continue };
+            let Some(rect) = pw.container.compute_bounds(&self.content_box) else {
+                continue;
+            };
+            if vertical {
+                if rect.y() as f64 <= viewport_bottom {
+                    reached = Some(key.page_idx.max(reached.unwrap_or(0)));
+                }
+            } else if rect.x() as f64 <= viewport_right {
+                reached = Some(key.page_idx.max(reached.unwrap_or(0)));
+            }
+        }
+        reached
+    }
+
+    /// Pure mapping from the zero-based last page reached to the 1-based
+    /// `last_page` and a `completed` flag scoped to that chapter's page count.
+    fn progress_from_reached(reached: usize, total_pages: usize) -> (i64, bool) {
+        let last_page = reached.saturating_add(1) as i64;
+        let completed = total_pages > 0 && reached >= total_pages.saturating_sub(1);
+        (last_page, completed)
     }
 
     pub fn toggle_reading_mode(&self) {
@@ -581,6 +806,13 @@ impl ReaderView {
             }
         }
 
+        // If at bottom of comic and user scrolls DOWN (delta_y > 0), load next chapter
+        let max_scroll = (vadj.upper() - vadj.page_size()).max(0.0);
+        if delta_y > 0.0 && current_val >= max_scroll - 10.0 {
+            self.next_chapter();
+            return;
+        }
+
         let base_y = self.target_y.borrow().unwrap_or(current_val);
         let dest_y = base_y + delta_y;
         self.smooth_scroll_to(dest_y);
@@ -625,6 +857,43 @@ impl ReaderView {
         }
 
         self.smooth_scroll_to(current_chap_y);
+    }
+
+    /// G: jump to the bottom of the chapter currently under the viewport.
+    /// Unlike `smooth_scroll_to(f64::MAX)` this does NOT trigger the
+    /// near-bottom auto-append chain, so it cannot walk the whole series.
+    pub fn jump_to_current_chapter_bottom(&self) {
+        let global_to_key = self.global_to_key.borrow();
+        if global_to_key.is_empty() {
+            return;
+        }
+        let cur_idx = self.global_page_at_viewport_center();
+        let chapter_id = global_to_key[cur_idx].chapter_idx;
+
+        // Last global index belonging to the current chapter.
+        let last_idx = match global_to_key
+            .iter()
+            .rposition(|k| k.chapter_idx == chapter_id)
+        {
+            Some(i) => i,
+            None => return,
+        };
+
+        match *self.reading_mode.borrow() {
+            ReadingMode::ContinuousVertical => {
+                let page_widgets = self.page_widgets.borrow();
+                if let Some(pw) = page_widgets.get(&global_to_key[last_idx]) {
+                    if let Some(rect) = pw.container.compute_bounds(&self.content_box) {
+                        let viewport = self.scrolled_window.vadjustment().page_size();
+                        let target = (rect.y() as f64 + rect.height() as f64 - viewport).max(0.0);
+                        self.smooth_scroll_to(target);
+                    }
+                }
+            }
+            ReadingMode::ContinuousHorizontal => {
+                self.smooth_scroll_to_page(last_idx);
+            }
+        }
     }
 
     pub fn next_chapter(&self) {
@@ -1077,5 +1346,23 @@ impl ReaderView {
 
         self.content_box.set_visible(false);
         self.status_page.set_visible(true);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ReaderView;
+
+    #[test]
+    fn progress_from_reached_is_chapter_local() {
+        // 15-page chapter: page 15 reached (idx 14) -> last page, completed.
+        assert_eq!(ReaderView::progress_from_reached(14, 15), (15, true));
+        // Mid-chapter.
+        assert_eq!(ReaderView::progress_from_reached(5, 15), (6, false));
+        // First page.
+        assert_eq!(ReaderView::progress_from_reached(0, 15), (1, false));
+        // Total page count for "completed" uses this chapter's own count.
+        assert_eq!(ReaderView::progress_from_reached(14, 15), (15, true));
+        assert_eq!(ReaderView::progress_from_reached(3, 4), (4, true));
     }
 }

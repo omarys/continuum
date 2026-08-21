@@ -6,7 +6,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 use std::time::Duration;
 
-use crate::ui::reader::ReaderView;
+use crate::ui::reader::{ExitPayload, ReaderView};
 
 pub struct ManhwaWindow {
     pub window: ApplicationWindow,
@@ -95,6 +95,18 @@ impl ManhwaWindow {
         });
 
         let window_struct = Self { window, reader };
+
+        // dewey integration contract: emit the exit payload (current page +
+        // completion) when the window closes, so the spawning process can
+        // persist reading progress.
+        let reader_rc = window_struct.reader.clone();
+        window_struct.window.connect_close_request(move |_| {
+            if let Some(payload) = reader_rc.exit_payload() {
+                println!("{}", exit_payload_json(&payload));
+            }
+            glib::Propagation::Proceed
+        });
+
         window_struct.setup_actions(open_btn);
         window_struct
     }
@@ -295,8 +307,8 @@ impl ManhwaWindow {
                 reader_key.smooth_scroll_by(-page_size * 0.5);
                 glib::Propagation::Stop
             } else if keyval == gdk4::Key::G {
-                // G (Shift+G): Jump to absolute bottom of last page image
-                reader_key.smooth_scroll_to(f64::MAX);
+                // G (Shift+G): Jump to bottom of the current chapter
+                reader_key.jump_to_current_chapter_bottom();
                 glib::Propagation::Stop
             } else if keyval == gdk4::Key::g {
                 let now = std::time::Instant::now();
@@ -477,5 +489,67 @@ pub fn show_shortcuts_dialog(parent: &impl IsA<gtk4::Window>) {
     if let Some(dialog) = builder.object::<gtk4::ShortcutsWindow>("shortcuts_window") {
         dialog.set_transient_for(Some(parent));
         dialog.present();
+    }
+}
+
+/// Escapes a string for a JSON string literal (backslash + double-quote).
+fn escape_json_string(s: &str) -> String {
+    s.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
+/// Serializes the multi-chapter exit payload to a single JSON line, hand-rolled
+/// (no serde dependency).
+fn exit_payload_json(payload: &ExitPayload) -> String {
+    let chapters = payload
+        .chapters
+        .iter()
+        .map(|c| {
+            format!(
+                "{{\"file\": \"{}\", \"last_page\": {}, \"completed\": {}}}",
+                escape_json_string(&c.file),
+                c.last_page,
+                c.completed
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "{{\"last_page\": {}, \"completed\": {}, \"chapters\": [{}]}}",
+        payload.last_page, payload.completed, chapters
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ui::reader::ChapterProgressEntry;
+
+    #[test]
+    fn serializes_multi_chapter_payload() {
+        let payload = ExitPayload {
+            last_page: 15,
+            completed: true,
+            chapters: vec![
+                ChapterProgressEntry {
+                    file: "/manga/[0047]_Ch.cbz".to_string(),
+                    last_page: 15,
+                    completed: true,
+                },
+                ChapterProgressEntry {
+                    file: "/manga/next.cbz".to_string(),
+                    last_page: 4,
+                    completed: false,
+                },
+            ],
+        };
+        assert_eq!(
+            exit_payload_json(&payload),
+            "{\"last_page\": 15, \"completed\": true, \"chapters\": [{\"file\": \"/manga/[0047]_Ch.cbz\", \"last_page\": 15, \"completed\": true}, {\"file\": \"/manga/next.cbz\", \"last_page\": 4, \"completed\": false}]}"
+        );
+    }
+
+    #[test]
+    fn escapes_backslash_and_quote_in_paths() {
+        assert_eq!(escape_json_string("/a\\b\"c.cbz"), "/a\\\\b\\\"c.cbz");
     }
 }

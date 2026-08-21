@@ -168,6 +168,66 @@ impl CbzArchive {
     }
 }
 
+/// Attempts to extract the canonical chapter/episode number from a comic filename.
+/// Handles formats like:
+/// - "[0047]_Chapter_0_Sep_7_2024.cbz" -> 0.0
+/// - "[0000]_Chapter_40.6_Apr_4.cbz" -> 40.6
+/// - "[0208]_Episode_1_Sep_7_2024.cbz" -> 1.0
+/// - "Official_Chapter 70_95fbe1.cbz" -> 70.0
+/// - "Solo_Leveling_Ch01.cbz" -> 1.0
+pub fn extract_chapter_number(filename: &str) -> Option<f64> {
+    let stem = Path::new(filename)
+        .file_stem()
+        .map(|s| s.to_string_lossy())
+        .unwrap_or_else(|| filename.into());
+    let lower = stem.to_lowercase();
+
+    // Look for explicit keywords: chapter, episode, chap, ep, ch, vol, v, c
+    let keywords = ["chapter", "episode", "chap", "ep", "ch", "vol", "v", "c"];
+    for kw in &keywords {
+        if let Some(pos) = lower.find(kw) {
+            let after = &lower[pos + kw.len()..];
+            // Skip separators like ' ', '_', '-', '.', ':'
+            let trimmed = after.trim_start_matches(|c: char| {
+                c.is_whitespace() || c == '_' || c == '-' || c == '.' || c == ':'
+            });
+            if let Some(num) = parse_leading_number(trimmed) {
+                return Some(num);
+            }
+        }
+    }
+
+    None
+}
+
+fn parse_leading_number(s: &str) -> Option<f64> {
+    let mut end = 0;
+    let mut has_dot = false;
+    for (i, c) in s.char_indices() {
+        if c.is_ascii_digit() {
+            end = i + 1;
+        } else if c == '.' && !has_dot {
+            if s[i + 1..]
+                .chars()
+                .next()
+                .is_some_and(|next_c| next_c.is_ascii_digit())
+            {
+                has_dot = true;
+                end = i + 1;
+            } else {
+                break;
+            }
+        } else {
+            break;
+        }
+    }
+    if end > 0 {
+        s[..end].parse::<f64>().ok()
+    } else {
+        None
+    }
+}
+
 pub struct DirectorySeries {
     pub dir_files: Vec<PathBuf>,
     pub current_index: usize,
@@ -193,10 +253,18 @@ impl DirectorySeries {
             .collect();
 
         dir_files.sort_by(|a, b| {
-            natord::compare(
-                &a.file_name().unwrap_or_default().to_string_lossy(),
-                &b.file_name().unwrap_or_default().to_string_lossy(),
-            )
+            let name_a = a.file_name().unwrap_or_default().to_string_lossy();
+            let name_b = b.file_name().unwrap_or_default().to_string_lossy();
+            let num_a = extract_chapter_number(&name_a);
+            let num_b = extract_chapter_number(&name_b);
+
+            match (num_a, num_b) {
+                (Some(na), Some(nb)) => na
+                    .partial_cmp(&nb)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+                    .then_with(|| natord::compare(&name_a, &name_b)),
+                _ => natord::compare(&name_a, &name_b),
+            }
         });
 
         let current_index = dir_files
@@ -246,6 +314,32 @@ mod tests {
             assert_eq!(series1.current_index, 0);
             assert_eq!(series2.current_index, 1);
         }
+    }
+
+    #[test]
+    fn test_extract_chapter_number() {
+        assert_eq!(
+            extract_chapter_number("[0047]_Chapter_0_Sep_7_2024.cbz"),
+            Some(0.0)
+        );
+        assert_eq!(
+            extract_chapter_number("[0046]_Chapter_1_Sep_7_2024.cbz"),
+            Some(1.0)
+        );
+        assert_eq!(
+            extract_chapter_number("[0000]_Chapter_40.6_Apr_4.cbz"),
+            Some(40.6)
+        );
+        assert_eq!(
+            extract_chapter_number("[0208]_Episode_1_Sep_7_2024.cbz"),
+            Some(1.0)
+        );
+        assert_eq!(
+            extract_chapter_number("Official_Chapter 70_95fbe1.cbz"),
+            Some(70.0)
+        );
+        assert_eq!(extract_chapter_number("Solo_Leveling_Ch01.cbz"), Some(1.0));
+        assert_eq!(extract_chapter_number("Random_Book.cbz"), None);
     }
 
     #[test]
