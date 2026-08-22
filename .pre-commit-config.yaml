@@ -5,7 +5,15 @@ repos:
       - id: trailing-whitespace
       - id: end-of-file-fixer
       - id: check-yaml
+        args: [--allow-multiple-documents]
       - id: check-added-large-files
+      - id: check-case-conflict
+      - id: check-json
+      - id: fix-byte-order-marker
+      - id: detect-private-key
+      - id: check-merge-conflict
+      - id: mixed-line-ending
+        args: [--fix=lf]
 
   - repo: https://github.com/doublify/pre-commit-rust
     rev: v1.0

@@ -148,13 +148,15 @@ Kirigami.ApplicationWindow {
         id: shortcutsSheet
     }
 
+    property var lastGPressTime: 0
+
     // Global Key Controller
     Item {
         focus: true
         anchors.fill: parent
 
         Keys.onPressed: (event) => {
-            if (event.key === Qt.Key_M) {
+            if (event.key === Qt.Key_M || event.key === Qt.Key_D) {
                 engine.toggle_reading_mode();
                 event.accepted = true;
             } else if (event.key === Qt.Key_F || event.key === Qt.Key_F11) {
@@ -165,6 +167,17 @@ Kirigami.ApplicationWindow {
                 event.accepted = true;
             } else if (event.key === Qt.Key_Question) {
                 shortcutsSheet.open();
+                event.accepted = true;
+            } else if (event.key === Qt.Key_G) {
+                if (event.modifiers & Qt.ShiftModifier) {
+                    readerView.jumpToCurrentChapterBottom();
+                } else {
+                    var now = Date.now();
+                    if (now - root.lastGPressTime < 500) {
+                        readerView.jumpToCurrentChapterTop();
+                    }
+                    root.lastGPressTime = now;
+                }
                 event.accepted = true;
             } else if (event.key === Qt.Key_J || event.key === Qt.Key_Down) {
                 readerView.scrollDown(event.modifiers & Qt.ShiftModifier ? 350 : 100);

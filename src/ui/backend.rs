@@ -67,6 +67,8 @@ pub struct ContinuumEngine {
     pub get_page_chapter_page_count: qt_method!(fn(&self, global_idx: i32) -> i32),
     pub get_page_chapter_page_idx: qt_method!(fn(&self, global_idx: i32) -> i32),
     pub update_current_page: qt_method!(fn(&mut self, global_idx: i32)),
+    pub get_current_chapter_first_global_idx: qt_method!(fn(&self) -> i32),
+    pub get_current_chapter_last_global_idx: qt_method!(fn(&self) -> i32),
     pub next_chapter: qt_method!(fn(&mut self) -> bool),
     pub prev_chapter: qt_method!(fn(&mut self) -> bool),
     pub jump_to_chapter: qt_method!(fn(&mut self, series_idx: i32) -> bool),
@@ -158,6 +160,8 @@ impl ContinuumEngine {
             get_page_chapter_page_count: Default::default(),
             get_page_chapter_page_idx: Default::default(),
             update_current_page: Default::default(),
+            get_current_chapter_first_global_idx: Default::default(),
+            get_current_chapter_last_global_idx: Default::default(),
             next_chapter: Default::default(),
             prev_chapter: Default::default(),
             jump_to_chapter: Default::default(),
@@ -556,6 +560,54 @@ impl ContinuumEngine {
         self.check_chapter_completion(key.chapter_idx, key.page_idx, chap.page_count);
     }
 
+    pub fn get_current_chapter_first_global_idx(&self) -> i32 {
+        let current_series_idx = if self.current_chapter_idx > 0 {
+            (self.current_chapter_idx - 1) as usize
+        } else {
+            0
+        };
+        let chaps = match self.chapters.lock() {
+            Ok(c) => c,
+            Err(_) => return 0,
+        };
+        let chap_id = match chaps.iter().find(|c| c.series_idx == current_series_idx) {
+            Some(c) => c.chapter_id,
+            None => return 0,
+        };
+        let keys = match self.global_to_key.lock() {
+            Ok(k) => k,
+            Err(_) => return 0,
+        };
+        keys.iter()
+            .position(|k| k.chapter_idx == chap_id)
+            .map(|i| i as i32)
+            .unwrap_or(0)
+    }
+
+    pub fn get_current_chapter_last_global_idx(&self) -> i32 {
+        let current_series_idx = if self.current_chapter_idx > 0 {
+            (self.current_chapter_idx - 1) as usize
+        } else {
+            0
+        };
+        let chaps = match self.chapters.lock() {
+            Ok(c) => c,
+            Err(_) => return 0,
+        };
+        let chap_id = match chaps.iter().find(|c| c.series_idx == current_series_idx) {
+            Some(c) => c.chapter_id,
+            None => return 0,
+        };
+        let keys = match self.global_to_key.lock() {
+            Ok(k) => k,
+            Err(_) => return 0,
+        };
+        keys.iter()
+            .rposition(|k| k.chapter_idx == chap_id)
+            .map(|i| i as i32)
+            .unwrap_or(0)
+    }
+
     pub fn next_chapter(&mut self) -> bool {
         let last_idx = *self.last_loaded_series_idx.lock().unwrap();
         let series_opt = self.series.lock().unwrap().clone();
@@ -764,9 +816,36 @@ impl ContinuumEngine {
             .map(|c| (c.series_idx + 1) as i64)
             .collect();
 
+        let current_series_idx = if self.current_chapter_idx > 0 {
+            (self.current_chapter_idx - 1) as usize
+        } else {
+            0
+        };
+
+        let chapters_progress: Vec<serde_json::Value> = chaps
+            .iter()
+            .map(|c| {
+                let (chap_last_page, chap_completed) =
+                    if completed_set.contains(&c.series_idx) || c.series_idx < current_series_idx {
+                        (c.page_count as i64, true)
+                    } else if c.series_idx == current_series_idx {
+                        (last_page, is_completed)
+                    } else {
+                        (1, false)
+                    };
+
+                serde_json::json!({
+                    "file": c.archive_path.to_string_lossy().to_string(),
+                    "last_page": chap_last_page,
+                    "completed": chap_completed
+                })
+            })
+            .collect();
+
         let exit_payload = serde_json::json!({
             "last_page": last_page,
             "completed": is_completed,
+            "chapters": chapters_progress,
             "completed_chapters": completed_chapters_paths,
             "completed_filenames": completed_filenames,
             "completed_chapter_indices": completed_indices,

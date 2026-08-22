@@ -53,6 +53,20 @@ Item {
         engine.request_pages_around(pageIndex);
     }
 
+    function jumpToCurrentChapterBottom() {
+        var lastIdx = engine.get_current_chapter_last_global_idx();
+        if (lastIdx >= 0) {
+            jumpToPage(lastIdx);
+        }
+    }
+
+    function jumpToCurrentChapterTop() {
+        var firstIdx = engine.get_current_chapter_first_global_idx();
+        if (firstIdx >= 0) {
+            jumpToPage(firstIdx);
+        }
+    }
+
     // Empty State Placeholder (when no comic is open)
     Kirigami.PlaceholderMessage {
         id: placeholder
@@ -111,7 +125,7 @@ Item {
             readonly property int pageIndex: index
             readonly property bool isChapterStart: engine.is_first_page_of_chapter(pageIndex)
             readonly property real naturalRatio: (pageImg.implicitWidth > 0) ? (pageImg.implicitHeight / pageImg.implicitWidth) : 1.75
-            readonly property real contentWidth: Math.min(pageDelegate.width * readerRoot.zoomFactor, 960 * readerRoot.zoomFactor)
+            readonly property real contentWidth: pageDelegate.width * readerRoot.zoomFactor
             readonly property real bannerHeight: isChapterStart ? 64 : 0
             readonly property real calculatedImgHeight: pageImg.status === Image.Ready ? (contentWidth * naturalRatio) : Math.max(contentWidth * 1.5, 400)
 

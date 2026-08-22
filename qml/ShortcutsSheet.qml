@@ -19,7 +19,7 @@ Kirigami.OverlaySheet {
 
         Controls.Label {
             Kirigami.FormData.label: "Toggle Mode:"
-            text: "M (Vertical Webtoon / Horizontal Manga)"
+            text: "M / D (Vertical Webtoon / Horizontal Manga)"
         }
 
         Controls.Label {
@@ -35,6 +35,11 @@ Kirigami.OverlaySheet {
         Controls.Label {
             Kirigami.FormData.label: "Page Scroll:"
             text: "Space (Down) / Shift + Space (Up)"
+        }
+
+        Controls.Label {
+            Kirigami.FormData.label: "Chapter Top / Bottom:"
+            text: "gg / Shift + G"
         }
 
         Controls.Label {

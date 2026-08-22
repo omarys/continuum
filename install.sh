@@ -1,8 +1,11 @@
 #!/usr/bin/env bash
-set -e
+set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
+
+# Append native-target flags, preserving any user-supplied RUSTFLAGS.
+export RUSTFLAGS="${RUSTFLAGS:-} -C target-cpu=native"
 
 echo "=== Installing Continuum (KDE Plasma Native) ==="
 
