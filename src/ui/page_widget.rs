@@ -43,7 +43,9 @@ impl PageWidget {
 
         let picture = Picture::builder()
             .content_fit(ContentFit::Contain)
-            .can_shrink(true)
+            .can_shrink(false)
+            .hexpand(true)
+            .vexpand(false)
             .visible(false)
             .build();
 
@@ -88,7 +90,12 @@ impl PageWidget {
             ReadingMode::ContinuousVertical => {
                 self.container.remove_css_class("manga-page");
                 self.container.set_vexpand(false);
+                self.container.set_valign(Align::Fill);
                 self.picture.set_vexpand(false);
+                self.picture.set_valign(Align::Fill);
+                self.picture.set_can_shrink(false);
+                self.picture.set_content_fit(ContentFit::Contain);
+                self.picture.set_hexpand(true);
                 self.container.set_width_request(-1);
                 if !*self.is_loaded.borrow() {
                     self.container.set_height_request(self.expected_height);
@@ -127,6 +134,15 @@ impl PageWidget {
 
         self.picture.set_paintable(Some(texture));
 
+        let is_manga = self.container.has_css_class("manga-page");
+        if !is_manga {
+            self.container.set_height_request(-1);
+            self.picture.set_content_fit(ContentFit::Contain);
+            self.picture.set_can_shrink(false);
+            self.picture.set_hexpand(true);
+            self.picture.set_vexpand(false);
+        }
+
         self.placeholder.set_visible(false);
         self.picture.set_visible(true);
         self.spinner.set_spinning(false);
@@ -139,6 +155,8 @@ impl PageWidget {
         self.picture.set_paintable(None::<&gdk4::Texture>);
         self.picture.set_visible(false);
 
+        self.container.set_height_request(self.expected_height);
+        self.placeholder.set_height_request(self.expected_height);
         self.placeholder.set_visible(true);
         self.spinner.set_spinning(false);
 
