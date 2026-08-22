@@ -36,11 +36,36 @@ Item {
     }
 
     function nextChapter() {
-        engine.next_chapter();
+        var currentSeriesIdx = engine.current_chapter_idx - 1;
+        var nextSeriesIdx = currentSeriesIdx + 1;
+        if (nextSeriesIdx < engine.total_chapters_count) {
+            var firstIdx = engine.get_series_chapter_first_global_idx(nextSeriesIdx);
+            if (firstIdx >= 0) {
+                jumpToPage(firstIdx);
+            } else {
+                engine.jump_to_chapter(nextSeriesIdx);
+            }
+        }
     }
 
     function prevChapter() {
-        engine.prev_chapter();
+        var currentSeriesIdx = engine.current_chapter_idx - 1;
+        var prevSeriesIdx = currentSeriesIdx - 1;
+        if (prevSeriesIdx >= 0) {
+            var firstIdx = engine.get_series_chapter_first_global_idx(prevSeriesIdx);
+            if (firstIdx >= 0) {
+                jumpToPage(firstIdx);
+            } else {
+                engine.jump_to_chapter(prevSeriesIdx);
+            }
+        }
+    }
+
+    function jumpToChapterPage(pageNumber) {
+        var globalIdx = engine.get_current_chapter_page_global_idx(pageNumber);
+        if (globalIdx >= 0) {
+            jumpToPage(globalIdx);
+        }
     }
 
     function jumpToPage(pageIndex) {
@@ -371,13 +396,13 @@ Item {
             Controls.Slider {
                 id: pageSlider
                 Layout.fillWidth: true
-                from: 0
-                to: Math.max(engine.total_pages_count - 1, 0)
+                from: 1
+                to: Math.max(engine.current_chapter_page_count, 1)
                 stepSize: 1
-                value: engine.reading_mode === 0 ? 0 : horizontalListView.currentIndex
+                value: engine.current_page_number
                 live: false
                 onMoved: {
-                    readerRoot.jumpToPage(Math.round(value));
+                    readerRoot.jumpToChapterPage(Math.round(value));
                 }
             }
 

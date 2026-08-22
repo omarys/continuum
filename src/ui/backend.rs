@@ -69,6 +69,8 @@ pub struct ContinuumEngine {
     pub update_current_page: qt_method!(fn(&mut self, global_idx: i32)),
     pub get_current_chapter_first_global_idx: qt_method!(fn(&self) -> i32),
     pub get_current_chapter_last_global_idx: qt_method!(fn(&self) -> i32),
+    pub get_current_chapter_page_global_idx: qt_method!(fn(&self, page_number: i32) -> i32),
+    pub get_series_chapter_first_global_idx: qt_method!(fn(&self, series_idx: i32) -> i32),
     pub next_chapter: qt_method!(fn(&mut self) -> bool),
     pub prev_chapter: qt_method!(fn(&mut self) -> bool),
     pub jump_to_chapter: qt_method!(fn(&mut self, series_idx: i32) -> bool),
@@ -162,6 +164,8 @@ impl ContinuumEngine {
             update_current_page: Default::default(),
             get_current_chapter_first_global_idx: Default::default(),
             get_current_chapter_last_global_idx: Default::default(),
+            get_current_chapter_page_global_idx: Default::default(),
+            get_series_chapter_first_global_idx: Default::default(),
             next_chapter: Default::default(),
             prev_chapter: Default::default(),
             jump_to_chapter: Default::default(),
@@ -616,6 +620,47 @@ impl ContinuumEngine {
             .rposition(|k| k.chapter_idx == chap_id)
             .map(|i| i as i32)
             .unwrap_or(0)
+    }
+
+    pub fn get_current_chapter_page_global_idx(&self, page_number: i32) -> i32 {
+        let first_idx = self.get_current_chapter_first_global_idx();
+        if first_idx < 0 {
+            return 0;
+        }
+        let local_offset = (page_number - 1).max(0);
+        let target_global = first_idx + local_offset;
+        let total = match self.global_to_key.lock() {
+            Ok(k) => k.len() as i32,
+            Err(_) => 0,
+        };
+        if total == 0 {
+            0
+        } else {
+            target_global.min(total - 1)
+        }
+    }
+
+    pub fn get_series_chapter_first_global_idx(&self, series_idx: i32) -> i32 {
+        if series_idx < 0 {
+            return -1;
+        }
+        let target_series_idx = series_idx as usize;
+        let chaps = match self.chapters.lock() {
+            Ok(c) => c,
+            Err(_) => return -1,
+        };
+        let chap_id = match chaps.iter().find(|c| c.series_idx == target_series_idx) {
+            Some(c) => c.chapter_id,
+            None => return -1,
+        };
+        let keys = match self.global_to_key.lock() {
+            Ok(k) => k,
+            Err(_) => return -1,
+        };
+        keys.iter()
+            .position(|k| k.chapter_idx == chap_id)
+            .map(|i| i as i32)
+            .unwrap_or(-1)
     }
 
     pub fn next_chapter(&mut self) -> bool {
