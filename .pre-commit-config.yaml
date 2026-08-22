@@ -5,11 +5,43 @@ repos:
       - id: trailing-whitespace
       - id: end-of-file-fixer
       - id: check-yaml
+        args: [--allow-multiple-documents]
       - id: check-added-large-files
-
+      - id: check-case-conflict
+      - id: check-json
+      - id: fix-byte-order-marker
+      - id: detect-private-key
+      - id: check-merge-conflict
+      - id: mixed-line-ending
+        args: [--fix=lf]
+  - repo: https://github.com/trufflesecurity/trufflehog
+    rev: v3.95.9
+    hooks:
+      - id: trufflehog
   - repo: https://github.com/doublify/pre-commit-rust
     rev: v1.0
     hooks:
       - id: fmt
       - id: cargo-check
       - id: clippy
+  - repo: https://github.com/shellcheck-py/shellcheck-py
+    rev: v0.11.0.1
+    hooks:
+      - id: shellcheck
+        entry: shellcheck
+        language: system
+        types: [shell]
+        files: ^scripts/.*\.sh$
+  - repo: local
+    hooks:
+      - id: mise-upgrade
+        name: Mise upgrade
+        entry: mise upgrade --bump
+        language: system
+        pass_filenames: false
+      - id: bash-syntax
+        name: Bash syntax check
+        entry: bash -n
+        language: system
+        types: [shell]
+        files: ^scripts/.*\.sh$
