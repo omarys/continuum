@@ -50,6 +50,13 @@ fn main() {
         continuum_engine.pinned().borrow_mut().set_tui_mode(true);
     }
 
+    if let Some(mode) = &opts.mode {
+        continuum_engine
+            .pinned()
+            .borrow_mut()
+            .set_initial_reading_mode(mode);
+    }
+
     let mut qml_engine = QmlEngine::new();
 
     cpp!(unsafe [] {

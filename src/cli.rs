@@ -4,6 +4,7 @@ use std::path::PathBuf;
 pub struct CliOptions {
     pub file: Option<PathBuf>,
     pub page: Option<i64>,
+    pub mode: Option<String>,
     pub tui_mode: bool,
 }
 
@@ -34,6 +35,11 @@ impl CliOptions {
                         }
                     }
                 }
+                "--mode" | "-m" => {
+                    if let Some(val) = iter.next() {
+                        opts.mode = Some(val);
+                    }
+                }
                 other => {
                     if !other.starts_with('-') {
                         if opts.file.is_none() {
@@ -57,13 +63,22 @@ mod tests {
 
     #[test]
     fn test_parse_tui_and_flags() {
-        let args = vec!["--file", "/tmp/comic.cbz", "--page", "15", "--tui"];
+        let args = vec![
+            "--file",
+            "/tmp/comic.cbz",
+            "--page",
+            "15",
+            "--mode",
+            "manga",
+            "--tui",
+        ];
         let opts = CliOptions::parse_from_args(args);
         assert_eq!(
             opts,
             CliOptions {
                 file: Some(PathBuf::from("/tmp/comic.cbz")),
                 page: Some(15),
+                mode: Some("manga".to_string()),
                 tui_mode: true,
             }
         );
@@ -78,6 +93,7 @@ mod tests {
             CliOptions {
                 file: Some(PathBuf::from("/tmp/chapter1.cbz")),
                 page: Some(5),
+                mode: None,
                 tui_mode: true,
             }
         );
@@ -92,6 +108,7 @@ mod tests {
             CliOptions {
                 file: Some(PathBuf::from("/tmp/solo.cbz")),
                 page: None,
+                mode: None,
                 tui_mode: false,
             }
         );

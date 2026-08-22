@@ -304,6 +304,16 @@ impl ContinuumEngine {
         self.reading_mode_changed();
     }
 
+    pub fn set_initial_reading_mode(&mut self, mode_str: &str) {
+        let m = mode_str.to_lowercase();
+        if m == "manga" || m == "horizontal" {
+            self.reading_mode = 1;
+        } else {
+            self.reading_mode = 0;
+        }
+        self.reading_mode_changed();
+    }
+
     pub fn request_pages_around(&mut self, current_global_idx: i32) {
         let global_idx = current_global_idx.max(0) as usize;
 
@@ -842,9 +852,16 @@ impl ContinuumEngine {
             })
             .collect();
 
+        let mode_str = if self.reading_mode == 1 {
+            "manga"
+        } else {
+            "webtoon"
+        };
+
         let exit_payload = serde_json::json!({
             "last_page": last_page,
             "completed": is_completed,
+            "mode": mode_str,
             "chapters": chapters_progress,
             "completed_chapters": completed_chapters_paths,
             "completed_filenames": completed_filenames,
