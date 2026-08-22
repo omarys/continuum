@@ -9,18 +9,21 @@ use std::path::PathBuf;
 use std::rc::Rc;
 use ui::ManhwaWindow;
 
-/// Hand-rolled parse of the dewey-facing options (`--file <path>`, `--page <n>`).
+/// Hand-rolled parse of the dewey-facing options (`--file <path>`, `--page <n>`, `--mode <mode>`).
 /// Continuum itself only accepts a positional file, so these are consumed here
 /// and stripped before the GTK/GApplication option parser sees argv.
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct CliArgs {
     file: Option<PathBuf>,
     page: Option<i64>,
+    mode: Option<String>,
 }
 
 fn parse_cli_args(raw: &[String]) -> CliArgs {
     let mut cli = CliArgs {
         file: None,
         page: None,
+        mode: None,
     };
     let mut i = 1;
     while i < raw.len() {
@@ -37,6 +40,12 @@ fn parse_cli_args(raw: &[String]) -> CliArgs {
                     i += 1;
                 }
             }
+            "--mode" => {
+                if let Some(v) = raw.get(i + 1) {
+                    cli.mode = Some(v.to_string());
+                    i += 1;
+                }
+            }
             _ => {}
         }
         i += 1;
@@ -44,14 +53,14 @@ fn parse_cli_args(raw: &[String]) -> CliArgs {
     cli
 }
 
-/// argv for `run_with_args`: argv[0] plus positionals, with `--file/--page`
+/// argv for `run_with_args`: argv[0] plus positionals, with `--file/--page/--mode`
 /// (and their values) removed so GLib's option parser accepts them.
 fn filter_args(raw: &[String]) -> Vec<String> {
     let mut out = Vec::new();
     let mut i = 0;
     while i < raw.len() {
         match raw[i].as_str() {
-            "--file" | "--page" => i += 2, // skip option + value
+            "--file" | "--page" | "--mode" => i += 2, // skip option + value
             other => {
                 out.push(other.to_string());
                 i += 1;
@@ -82,28 +91,46 @@ fn main() -> glib::ExitCode {
 
     let cli_file = Rc::new(cli.file);
     let cli_page = cli.page;
+    let cli_mode = Rc::new(cli.mode);
     let cli_file_activate = cli_file.clone();
+    let cli_mode_activate = cli_mode.clone();
     app.connect_activate(move |app| {
-        open_window(app, cli_file_activate.as_ref().clone(), cli_page);
+        open_window(
+            app,
+            cli_file_activate.as_ref().clone(),
+            cli_page,
+            cli_mode_activate.as_ref().as_deref(),
+        );
     });
 
     let cli_file_open = cli_file.clone();
+    let cli_mode_open = cli_mode.clone();
     app.connect_open(move |app, files, _| {
         let positional = files.first().and_then(|f| f.path());
         let path = cli_file_open.as_ref().clone().or(positional);
-        open_window(app, path, cli_page);
+        open_window(app, path, cli_page, cli_mode_open.as_ref().as_deref());
     });
 
     app.run_with_args(&run_args)
 }
 
-fn open_window(app: &libadwaita::Application, path: Option<PathBuf>, page: Option<i64>) {
+fn open_window(
+    app: &libadwaita::Application,
+    path: Option<PathBuf>,
+    page: Option<i64>,
+    mode: Option<&str>,
+) {
     if let Some(active_win) = app.active_window() {
         active_win.present();
         return;
     }
 
     let manhwa_window = ManhwaWindow::new(app);
+    if let Some(m) = mode {
+        manhwa_window
+            .reader
+            .set_reading_mode(crate::ui::page_widget::ReadingMode::from_str_loose(m));
+    }
     if let Some(p) = path.filter(|p| p.exists()) {
         let _ = manhwa_window.reader.load_initial_file(p);
         if let Some(page) = page.filter(|p| *p > 0) {
@@ -125,10 +152,13 @@ mod tests {
             "/a/x.cbz".to_string(),
             "--page".to_string(),
             "42".to_string(),
+            "--mode".to_string(),
+            "manga".to_string(),
         ];
         let cli = parse_cli_args(&raw);
         assert_eq!(cli.file, Some(PathBuf::from("/a/x.cbz")));
         assert_eq!(cli.page, Some(42));
+        assert_eq!(cli.mode, Some("manga".to_string()));
         // GLib must never see our private flags.
         assert_eq!(filter_args(&raw), vec!["continuum".to_string()]);
     }
@@ -144,6 +174,7 @@ mod tests {
         let cli = parse_cli_args(&raw);
         assert_eq!(cli.file, None);
         assert_eq!(cli.page, Some(7));
+        assert_eq!(cli.mode, None);
         assert_eq!(
             filter_args(&raw),
             vec!["continuum".to_string(), "/a/y.cbz".to_string()]
@@ -206,16 +237,12 @@ fn load_custom_styles() {
         }
 
         .manga-page {
-            margin: 0 16px;
+            margin: 0;
+            padding: 0;
             border-left: 2px solid #2e2e42;
             border-right: 2px solid #2e2e42;
             border-radius: 6px;
             box-shadow: 0 8px 32px rgba(0, 0, 0, 0.7);
-        }
-
-        .manga-fade-overlay {
-            mask-image: linear-gradient(to right, transparent 0%, black 14%, black 86%, transparent 100%);
-            -webkit-mask-image: linear-gradient(to right, transparent 0%, black 14%, black 86%, transparent 100%);
         }
     "#;
 

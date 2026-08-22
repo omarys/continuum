@@ -11,6 +11,22 @@ pub enum ReadingMode {
     ContinuousHorizontal,
 }
 
+impl ReadingMode {
+    pub fn from_str_loose(s: &str) -> Self {
+        match s.trim().to_lowercase().as_str() {
+            "manga" | "horizontal" | "paged" => ReadingMode::ContinuousHorizontal,
+            _ => ReadingMode::ContinuousVertical,
+        }
+    }
+
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ReadingMode::ContinuousVertical => "webtoon",
+            ReadingMode::ContinuousHorizontal => "manga",
+        }
+    }
+}
+
 #[allow(dead_code)]
 #[derive(Clone)]
 pub struct PageWidget {
@@ -90,6 +106,7 @@ impl PageWidget {
             ReadingMode::ContinuousVertical => {
                 self.container.remove_css_class("manga-page");
                 self.container.set_vexpand(false);
+                self.container.set_hexpand(true);
                 self.container.set_valign(Align::Fill);
                 self.picture.set_vexpand(false);
                 self.picture.set_valign(Align::Fill);
@@ -107,22 +124,28 @@ impl PageWidget {
             ReadingMode::ContinuousHorizontal => {
                 self.container.add_css_class("manga-page");
                 self.container.set_vexpand(true);
+                self.container.set_hexpand(false);
                 self.container.set_valign(Align::Fill);
+                self.container.set_height_request(-1);
+                self.container.set_width_request(-1);
+
                 self.picture.set_can_shrink(true);
                 self.picture.set_content_fit(ContentFit::Contain);
                 self.picture.set_vexpand(true);
+                self.picture.set_hexpand(false);
                 self.picture.set_valign(Align::Fill);
+
+                self.placeholder.set_vexpand(true);
+                self.placeholder.set_valign(Align::Fill);
+                self.placeholder.set_height_request(-1);
 
                 let calc_width = if self.orig_width > 0 && self.orig_height > 0 {
                     let aspect = self.orig_height as f64 / self.orig_width as f64;
-                    ((820.0 / aspect) as i32).clamp(320, 1000)
+                    ((900.0 / aspect) as i32).max(300)
                 } else {
                     600
                 };
-                self.container.set_width_request(calc_width);
-                self.container.set_height_request(-1);
                 self.placeholder.set_width_request(calc_width);
-                self.placeholder.set_height_request(-1);
             }
         }
     }
@@ -137,10 +160,28 @@ impl PageWidget {
         let is_manga = self.container.has_css_class("manga-page");
         if !is_manga {
             self.container.set_height_request(-1);
+            self.container.set_width_request(-1);
+            self.container.set_vexpand(false);
+            self.container.set_hexpand(true);
+            self.container.set_valign(Align::Fill);
+
             self.picture.set_content_fit(ContentFit::Contain);
             self.picture.set_can_shrink(false);
             self.picture.set_hexpand(true);
             self.picture.set_vexpand(false);
+            self.picture.set_valign(Align::Fill);
+        } else {
+            self.container.set_height_request(-1);
+            self.container.set_width_request(-1);
+            self.container.set_vexpand(true);
+            self.container.set_hexpand(false);
+            self.container.set_valign(Align::Fill);
+
+            self.picture.set_content_fit(ContentFit::Contain);
+            self.picture.set_can_shrink(true);
+            self.picture.set_vexpand(true);
+            self.picture.set_hexpand(false);
+            self.picture.set_valign(Align::Fill);
         }
 
         self.placeholder.set_visible(false);
@@ -155,8 +196,14 @@ impl PageWidget {
         self.picture.set_paintable(None::<&gdk4::Texture>);
         self.picture.set_visible(false);
 
-        self.container.set_height_request(self.expected_height);
-        self.placeholder.set_height_request(self.expected_height);
+        let is_manga = self.container.has_css_class("manga-page");
+        if !is_manga {
+            self.container.set_height_request(self.expected_height);
+            self.placeholder.set_height_request(self.expected_height);
+        } else {
+            self.container.set_height_request(-1);
+            self.placeholder.set_height_request(-1);
+        }
         self.placeholder.set_visible(true);
         self.spinner.set_spinning(false);
 

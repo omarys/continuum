@@ -37,6 +37,7 @@ pub struct ChapterProgressEntry {
 pub struct ExitPayload {
     pub last_page: i64,
     pub completed: bool,
+    pub mode: String,
     pub chapters: Vec<ChapterProgressEntry>,
 }
 
@@ -209,6 +210,7 @@ impl ReaderView {
         let banner = create_chapter_banner(&archive.filename, total_pages);
         self.content_box.append(&banner);
 
+        let mode = *self.reading_mode.borrow();
         for page_idx in 0..total_pages {
             let (w, h) = archive.get_dimensions(page_idx);
             let key = PageKey {
@@ -216,6 +218,7 @@ impl ReaderView {
                 page_idx,
             };
             let page_widget = PageWidget::new(key.clone(), page_idx, total_pages, w, h);
+            page_widget.update_layout_for_mode(mode);
             self.content_box.append(&page_widget.container);
             self.page_widgets
                 .borrow_mut()
@@ -252,11 +255,13 @@ impl ReaderView {
             .borrow_mut()
             .splice(0..0, new_keys.clone());
 
+        let mode = *self.reading_mode.borrow();
         let mut prepended_h = 100.0;
         for page_idx in (0..total_pages).rev() {
             let (w, h) = archive.get_dimensions(page_idx);
             let key = &new_keys[page_idx];
             let pw = PageWidget::new(key.clone(), page_idx, total_pages, w, h);
+            pw.update_layout_for_mode(mode);
             prepended_h += pw.expected_height as f64;
             self.content_box.prepend(&pw.container);
             self.page_widgets.borrow_mut().insert(key.clone(), pw);
@@ -611,9 +616,11 @@ impl ReaderView {
         }
 
         let first = &entries[0];
+        let current_mode = self.reading_mode.borrow().as_str().to_string();
         Some(ExitPayload {
             last_page: first.last_page,
             completed: first.completed,
+            mode: current_mode,
             chapters: entries,
         })
     }
@@ -675,11 +682,16 @@ impl ReaderView {
             ReadingMode::ContinuousVertical => {
                 self.content_box.set_orientation(Orientation::Vertical);
                 self.content_box.set_vexpand(false);
+                self.content_box.set_valign(Align::Fill);
+                self.content_box.set_spacing(0);
                 self.scrolled_window
                     .set_hscrollbar_policy(gtk4::PolicyType::Never);
                 self.scrolled_window
                     .set_vscrollbar_policy(gtk4::PolicyType::Automatic);
                 self.clamp.set_maximum_size(900);
+                self.clamp.set_tightening_threshold(700);
+                self.clamp.set_vexpand(false);
+                self.clamp.set_valign(Align::Fill);
                 self.scrolled_window.remove_css_class("manga-fade-overlay");
 
                 let page_widgets = self.page_widgets.borrow();
@@ -691,12 +703,15 @@ impl ReaderView {
                 self.content_box.set_orientation(Orientation::Horizontal);
                 self.content_box.set_vexpand(true);
                 self.content_box.set_valign(Align::Fill);
-                self.content_box.set_spacing(16);
+                self.content_box.set_spacing(24);
                 self.scrolled_window
                     .set_hscrollbar_policy(gtk4::PolicyType::Automatic);
                 self.scrolled_window
                     .set_vscrollbar_policy(gtk4::PolicyType::Never);
-                self.clamp.set_maximum_size(1600);
+                self.clamp.set_maximum_size(i32::MAX);
+                self.clamp.set_tightening_threshold(i32::MAX);
+                self.clamp.set_vexpand(true);
+                self.clamp.set_valign(Align::Fill);
                 self.scrolled_window.add_css_class("manga-fade-overlay");
 
                 let page_widgets = self.page_widgets.borrow();

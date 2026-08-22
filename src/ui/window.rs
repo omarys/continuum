@@ -514,8 +514,11 @@ fn exit_payload_json(payload: &ExitPayload) -> String {
         .collect::<Vec<_>>()
         .join(", ");
     format!(
-        "{{\"last_page\": {}, \"completed\": {}, \"chapters\": [{}]}}",
-        payload.last_page, payload.completed, chapters
+        "{{\"last_page\": {}, \"completed\": {}, \"mode\": \"{}\", \"chapters\": [{}]}}",
+        payload.last_page,
+        payload.completed,
+        escape_json_string(&payload.mode),
+        chapters
     )
 }
 
@@ -529,6 +532,7 @@ mod tests {
         let payload = ExitPayload {
             last_page: 15,
             completed: true,
+            mode: "manga".to_string(),
             chapters: vec![
                 ChapterProgressEntry {
                     file: "/manga/[0047]_Ch.cbz".to_string(),
@@ -544,7 +548,7 @@ mod tests {
         };
         assert_eq!(
             exit_payload_json(&payload),
-            "{\"last_page\": 15, \"completed\": true, \"chapters\": [{\"file\": \"/manga/[0047]_Ch.cbz\", \"last_page\": 15, \"completed\": true}, {\"file\": \"/manga/next.cbz\", \"last_page\": 4, \"completed\": false}]}"
+            "{\"last_page\": 15, \"completed\": true, \"mode\": \"manga\", \"chapters\": [{\"file\": \"/manga/[0047]_Ch.cbz\", \"last_page\": 15, \"completed\": true}, {\"file\": \"/manga/next.cbz\", \"last_page\": 4, \"completed\": false}]}"
         );
     }
 
