@@ -157,12 +157,16 @@ impl CbzArchive {
 }
 
 /// Attempts to extract the canonical chapter/episode number from a comic filename.
+///
 /// Handles formats like:
-/// - "[0047]_Chapter_0_Sep_7_2024.cbz" -> 0.0
-/// - "[0000]_Chapter_40.6_Apr_4.cbz" -> 40.6
-/// - "[0208]_Episode_1_Sep_7_2024.cbz" -> 1.0
-/// - "Official_Chapter 70_95fbe1.cbz" -> 70.0
-/// - "Solo_Leveling_Ch01.cbz" -> 1.0
+/// - `[0047]_Chapter_0_Sep_7_2024.cbz` -> 0.0
+/// - `[0000]_Chapter_40.6_Apr_4.cbz` -> 40.6
+/// - `[0208]_Episode_1_Sep_7_2024.cbz` -> 1.0
+/// - `Official_Chapter 70_95fbe1.cbz` -> 70.0
+/// - `Solo_Leveling_Ch01.cbz` -> 1.0
+/// - `Solo_Leveling_#105.cbz` -> 105.0
+///
+/// Note: Does NOT match "vol" or "v" as chapter numbers, since volumes are multi-chapter books.
 pub fn extract_chapter_number(filename: &str) -> Option<f64> {
     let stem = Path::new(filename)
         .file_stem()
@@ -170,8 +174,8 @@ pub fn extract_chapter_number(filename: &str) -> Option<f64> {
         .unwrap_or_else(|| filename.into());
     let lower = stem.to_lowercase();
 
-    // Look for explicit keywords: chapter, episode, chap, ep, ch, vol, v, c
-    let keywords = ["chapter", "episode", "chap", "ep", "ch", "vol", "v", "c"];
+    // Look for explicit chapter keywords ONLY
+    let keywords = ["chapter", "episode", "chap", "ep", "ch", "#"];
     for kw in &keywords {
         if let Some(pos) = lower.find(kw) {
             let after = &lower[pos + kw.len()..];
@@ -248,10 +252,9 @@ impl DirectorySeries {
             let num_b = extract_chapter_number(&name_b);
 
             match (num_a, num_b) {
-                (Some(na), Some(nb)) => na
-                    .partial_cmp(&nb)
-                    .unwrap_or(std::cmp::Ordering::Equal)
-                    .then_with(|| natord::compare(&name_a, &name_b)),
+                (Some(na), Some(nb)) if (na - nb).abs() > f64::EPSILON => {
+                    na.partial_cmp(&nb).unwrap_or(std::cmp::Ordering::Equal)
+                }
                 _ => natord::compare(&name_a, &name_b),
             }
         });
@@ -295,6 +298,18 @@ mod tests {
             Some(70.0)
         );
         assert_eq!(extract_chapter_number("Solo_Leveling_Ch01.cbz"), Some(1.0));
+        assert_eq!(
+            extract_chapter_number("Solo_Leveling_#105.cbz"),
+            Some(105.0)
+        );
+        assert_eq!(
+            extract_chapter_number("[0006]_Vol.1_Bonus_Material.cbz"),
+            None
+        );
+        assert_eq!(
+            extract_chapter_number("[0026]_Vol.2_Bonus_Material.cbz"),
+            None
+        );
         assert_eq!(extract_chapter_number("Random_Book.cbz"), None);
     }
 
