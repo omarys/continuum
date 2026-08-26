@@ -15,9 +15,9 @@ mkdir -p ~/.local/share/applications
 mkdir -p ~/.local/share/icons/hicolor/512x512/apps
 mkdir -p ~/.local/share/pixmaps
 
-cp dev.continuum.ManhwaReader.png ~/.local/share/icons/hicolor/512x512/apps/dev.continuum.ManhwaReader.png
-cp dev.continuum.ManhwaReader.png ~/.local/share/pixmaps/dev.continuum.ManhwaReader.png
-cp dev.continuum.ManhwaReader.desktop ~/.local/share/applications/dev.continuum.ManhwaReader.desktop
+cp assets/dev.continuum.ManhwaReader.png ~/.local/share/icons/hicolor/512x512/apps/dev.continuum.ManhwaReader.png
+cp assets/dev.continuum.ManhwaReader.png ~/.local/share/pixmaps/dev.continuum.ManhwaReader.png
+cp assets/dev.continuum.ManhwaReader.desktop ~/.local/share/applications/dev.continuum.ManhwaReader.desktop
 
 if command -v update-desktop-database >/dev/null 2>&1; then
   update-desktop-database ~/.local/share/applications
