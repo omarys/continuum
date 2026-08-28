@@ -41,6 +41,7 @@ pub struct PageWidget {
     pub expected_height: i32,
     pub orig_width: u32,
     pub orig_height: u32,
+    pub manga_width: Rc<RefCell<i32>>,
 }
 
 impl PageWidget {
@@ -98,10 +99,11 @@ impl PageWidget {
             expected_height: calc_height,
             orig_width: width,
             orig_height: height,
+            manga_width: Rc::new(RefCell::new(600)),
         }
     }
 
-    pub fn update_layout_for_mode(&self, mode: ReadingMode) {
+    pub fn update_layout_for_mode(&self, mode: ReadingMode, viewport_h: f64) {
         match mode {
             ReadingMode::ContinuousVertical => {
                 self.container.remove_css_class("manga-page");
@@ -127,7 +129,6 @@ impl PageWidget {
                 self.container.set_hexpand(false);
                 self.container.set_valign(Align::Fill);
                 self.container.set_height_request(-1);
-                self.container.set_width_request(-1);
 
                 self.picture.set_can_shrink(true);
                 self.picture.set_content_fit(ContentFit::Contain);
@@ -139,12 +140,18 @@ impl PageWidget {
                 self.placeholder.set_valign(Align::Fill);
                 self.placeholder.set_height_request(-1);
 
+                // Volume view: fit each page to the viewport height so a full
+                // page needs no vertical scrolling. Width = viewport_h / aspect.
                 let calc_width = if self.orig_width > 0 && self.orig_height > 0 {
                     let aspect = self.orig_height as f64 / self.orig_width as f64;
-                    ((900.0 / aspect) as i32).max(300)
+                    let base = if viewport_h > 0.0 { viewport_h } else { 900.0 };
+                    ((base / aspect) as i32).max(300)
                 } else {
                     600
                 };
+                *self.manga_width.borrow_mut() = calc_width;
+                self.container.set_width_request(calc_width);
+                self.picture.set_width_request(calc_width);
                 self.placeholder.set_width_request(calc_width);
             }
         }
@@ -171,8 +178,9 @@ impl PageWidget {
             self.picture.set_vexpand(false);
             self.picture.set_valign(Align::Fill);
         } else {
+            let manga_w = *self.manga_width.borrow();
             self.container.set_height_request(-1);
-            self.container.set_width_request(-1);
+            self.container.set_width_request(manga_w);
             self.container.set_vexpand(true);
             self.container.set_hexpand(false);
             self.container.set_valign(Align::Fill);
@@ -181,6 +189,7 @@ impl PageWidget {
             self.picture.set_can_shrink(true);
             self.picture.set_vexpand(true);
             self.picture.set_hexpand(false);
+            self.picture.set_width_request(manga_w);
             self.picture.set_valign(Align::Fill);
         }
 
@@ -203,6 +212,8 @@ impl PageWidget {
         } else {
             self.container.set_height_request(-1);
             self.placeholder.set_height_request(-1);
+            self.placeholder
+                .set_width_request(*self.manga_width.borrow());
         }
         self.placeholder.set_visible(true);
         self.spinner.set_spinning(false);

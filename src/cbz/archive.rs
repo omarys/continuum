@@ -1,6 +1,6 @@
 use gdk4::Texture;
 use std::fs::File;
-use std::io::{BufReader, Cursor};
+use std::io::Cursor;
 use std::path::{Path, PathBuf};
 use zip::ZipArchive;
 
@@ -37,10 +37,12 @@ pub struct DecodedImagePayload {
     pub rgba_bytes: Vec<u8>,
 }
 
+#[derive(Clone)]
 pub struct CbzArchive {
     pub path: PathBuf,
     pub filename: String,
     pub image_entries: Vec<String>,
+    pub data: std::sync::Arc<Vec<u8>>,
 }
 
 impl CbzArchive {
@@ -52,8 +54,10 @@ impl CbzArchive {
             );
         }
 
-        let file = File::open(&path_buf).map_err(|e| format!("Failed to open file: {}", e))?;
-        let reader = BufReader::new(file);
+        let raw_bytes =
+            std::fs::read(&path_buf).map_err(|e| format!("Failed to read file: {}", e))?;
+        let data = std::sync::Arc::new(raw_bytes);
+        let reader = Cursor::new(data.as_slice());
         let mut zip =
             ZipArchive::new(reader).map_err(|e| format!("Failed to read ZIP archive: {}", e))?;
 
@@ -95,7 +99,41 @@ impl CbzArchive {
             path: path_buf,
             filename,
             image_entries,
+            data,
         })
+    }
+
+    pub fn extract_entry_bytes(data: &[u8], entry_name: &str) -> Result<Vec<u8>, String> {
+        let cursor = Cursor::new(data);
+        let mut zip = ZipArchive::new(cursor).map_err(|e| e.to_string())?;
+        let mut entry = zip.by_name(entry_name).map_err(|e| e.to_string())?;
+
+        // Reject spoofed header sizes
+        if entry.size() > MAX_PAGE_FILE_SIZE {
+            return Err(format!(
+                "Entry '{}' declares size exceeding limit ({} > {} bytes)",
+                entry_name,
+                entry.size(),
+                MAX_PAGE_FILE_SIZE
+            ));
+        }
+
+        // Bound initial capacity allocation
+        let initial_cap = (entry.size() as usize).min(MAX_PAGE_FILE_SIZE as usize);
+        let mut buf = Vec::with_capacity(initial_cap);
+
+        // Bound decompression stream to prevent zip-bomb expansion
+        let mut limited_reader = std::io::Read::take(&mut entry, MAX_PAGE_FILE_SIZE + 1);
+        std::io::Read::read_to_end(&mut limited_reader, &mut buf).map_err(|e| e.to_string())?;
+
+        if buf.len() as u64 > MAX_PAGE_FILE_SIZE {
+            return Err(format!(
+                "Entry '{}' decompressed beyond maximum limit ({} bytes)",
+                entry_name, MAX_PAGE_FILE_SIZE
+            ));
+        }
+
+        Ok(buf)
     }
 
     pub fn page_count(&self) -> usize {

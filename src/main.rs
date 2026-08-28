@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use std::rc::Rc;
 use ui::ManhwaWindow;
 
-/// Hand-rolled parse of the dewey-facing options (`--file <path>`, `--page <n>`, `--mode <mode>`).
+/// Hand-rolled parse of the dewey-facing options (`--file <path>`, `--page <n>`, `--mode <mode>`, `--storage-profile <prof>`).
 /// Continuum itself only accepts a positional file, so these are consumed here
 /// and stripped before the GTK/GApplication option parser sees argv.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -17,6 +17,7 @@ struct CliArgs {
     file: Option<PathBuf>,
     page: Option<i64>,
     mode: Option<String>,
+    storage_profile: Option<String>,
 }
 
 fn parse_cli_args(raw: &[String]) -> CliArgs {
@@ -24,6 +25,7 @@ fn parse_cli_args(raw: &[String]) -> CliArgs {
         file: None,
         page: None,
         mode: None,
+        storage_profile: None,
     };
     let mut i = 1;
     while i < raw.len() {
@@ -46,6 +48,12 @@ fn parse_cli_args(raw: &[String]) -> CliArgs {
                     i += 1;
                 }
             }
+            "--storage-profile" => {
+                if let Some(v) = raw.get(i + 1) {
+                    cli.storage_profile = Some(v.to_string());
+                    i += 1;
+                }
+            }
             _ => {}
         }
         i += 1;
@@ -53,14 +61,14 @@ fn parse_cli_args(raw: &[String]) -> CliArgs {
     cli
 }
 
-/// argv for `run_with_args`: argv[0] plus positionals, with `--file/--page/--mode`
+/// argv for `run_with_args`: argv[0] plus positionals, with `--file/--page/--mode/--storage-profile`
 /// (and their values) removed so GLib's option parser accepts them.
 fn filter_args(raw: &[String]) -> Vec<String> {
     let mut out = Vec::new();
     let mut i = 0;
     while i < raw.len() {
         match raw[i].as_str() {
-            "--file" | "--page" | "--mode" => i += 2, // skip option + value
+            "--file" | "--page" | "--mode" | "--storage-profile" => i += 2, // skip option + value
             other => {
                 out.push(other.to_string());
                 i += 1;
@@ -92,23 +100,34 @@ fn main() -> glib::ExitCode {
     let cli_file = Rc::new(cli.file);
     let cli_page = cli.page;
     let cli_mode = Rc::new(cli.mode);
+    let cli_storage_profile = Rc::new(cli.storage_profile);
+
     let cli_file_activate = cli_file.clone();
     let cli_mode_activate = cli_mode.clone();
+    let cli_profile_activate = cli_storage_profile.clone();
     app.connect_activate(move |app| {
         open_window(
             app,
             cli_file_activate.as_ref().clone(),
             cli_page,
             cli_mode_activate.as_ref().as_deref(),
+            cli_profile_activate.as_ref().as_deref(),
         );
     });
 
     let cli_file_open = cli_file.clone();
     let cli_mode_open = cli_mode.clone();
+    let cli_profile_open = cli_storage_profile.clone();
     app.connect_open(move |app, files, _| {
         let positional = files.first().and_then(|f| f.path());
         let path = cli_file_open.as_ref().clone().or(positional);
-        open_window(app, path, cli_page, cli_mode_open.as_ref().as_deref());
+        open_window(
+            app,
+            path,
+            cli_page,
+            cli_mode_open.as_ref().as_deref(),
+            cli_profile_open.as_ref().as_deref(),
+        );
     });
 
     app.run_with_args(&run_args)
@@ -119,6 +138,7 @@ fn open_window(
     path: Option<PathBuf>,
     page: Option<i64>,
     mode: Option<&str>,
+    storage_profile: Option<&str>,
 ) {
     if let Some(active_win) = app.active_window() {
         active_win.present();
@@ -131,6 +151,18 @@ fn open_window(
             .reader
             .set_reading_mode(crate::ui::page_widget::ReadingMode::from_str_loose(m));
     }
+    if let Some(prof) = storage_profile {
+        manhwa_window.reader.set_storage_profile(prof);
+    } else if let Some(ref p) = path {
+        let p_str = p.to_string_lossy().to_lowercase();
+        if p_str.starts_with("/media/")
+            || p_str.starts_with("/run/media/")
+            || p_str.starts_with("/mnt/")
+            || p_str.contains("/usb")
+        {
+            manhwa_window.reader.set_storage_profile("usb");
+        }
+    }
     if let Some(p) = path.filter(|p| p.exists()) {
         let _ = manhwa_window.reader.load_initial_file(p);
         if let Some(page) = page.filter(|p| *p > 0) {
@@ -141,6 +173,7 @@ fn open_window(
 }
 
 #[cfg(test)]
+#[allow(clippy::items_after_test_module)]
 mod tests {
     use super::*;
 
@@ -154,11 +187,14 @@ mod tests {
             "42".to_string(),
             "--mode".to_string(),
             "manga".to_string(),
+            "--storage-profile".to_string(),
+            "usb".to_string(),
         ];
         let cli = parse_cli_args(&raw);
         assert_eq!(cli.file, Some(PathBuf::from("/a/x.cbz")));
         assert_eq!(cli.page, Some(42));
         assert_eq!(cli.mode, Some("manga".to_string()));
+        assert_eq!(cli.storage_profile, Some("usb".to_string()));
         // GLib must never see our private flags.
         assert_eq!(filter_args(&raw), vec!["continuum".to_string()]);
     }

@@ -11,7 +11,7 @@ use std::time::Duration;
 use crossbeam_channel::{unbounded, Receiver, Sender};
 
 use crate::cache::{MemoryManager, PageKey};
-use crate::cbz::{CbzArchive, DecodedImagePayload, DirectorySeries, MAX_PAGE_FILE_SIZE};
+use crate::cbz::{CbzArchive, DecodedImagePayload, DirectorySeries};
 use crate::ui::chapter_banner::create_chapter_banner;
 use crate::ui::page_widget::{PageWidget, ReadingMode};
 
@@ -65,6 +65,7 @@ pub struct ReaderView {
     pub is_animating: Rc<RefCell<bool>>,
     pub reading_mode: Rc<RefCell<ReadingMode>>,
     pub generation_id: Rc<RefCell<usize>>,
+    pub storage_profile: Rc<RefCell<String>>,
 
     // Channels
     pub tx: Sender<(PageKey, usize, Option<DecodedImagePayload>)>,
@@ -131,6 +132,7 @@ impl ReaderView {
         let is_animating = Rc::new(RefCell::new(false));
         let reading_mode = Rc::new(RefCell::new(ReadingMode::ContinuousVertical));
         let generation_id = Rc::new(RefCell::new(0));
+        let storage_profile = Rc::new(RefCell::new("fast".to_string()));
 
         let (tx, rx) = unbounded::<(PageKey, usize, Option<DecodedImagePayload>)>();
 
@@ -155,12 +157,43 @@ impl ReaderView {
             is_animating,
             reading_mode,
             generation_id,
+            storage_profile,
             tx,
             rx,
         };
 
         reader.setup_scroll_listener();
+
+        // Re-fit page widths to the viewport height whenever it changes
+        // (window resize) while in horizontal/volume mode.
+        let widgets = reader.page_widgets.clone();
+        let mode_rc = reader.reading_mode.clone();
         reader
+            .scrolled_window
+            .vadjustment()
+            .connect_changed(move |adj| {
+                if *mode_rc.borrow() == ReadingMode::ContinuousHorizontal {
+                    let viewport_h = adj.page_size();
+                    if viewport_h > 0.0 {
+                        for pw in widgets.borrow().values() {
+                            pw.update_layout_for_mode(
+                                ReadingMode::ContinuousHorizontal,
+                                viewport_h,
+                            );
+                        }
+                    }
+                }
+            });
+
+        reader
+    }
+
+    pub fn set_storage_profile(&self, profile: &str) {
+        *self.storage_profile.borrow_mut() = profile.to_string();
+    }
+
+    pub fn is_usb_mode(&self) -> bool {
+        self.storage_profile.borrow().eq_ignore_ascii_case("usb")
     }
 
     pub fn load_initial_file(&self, path: PathBuf) -> Result<(), String> {
@@ -218,7 +251,8 @@ impl ReaderView {
                 page_idx,
             };
             let page_widget = PageWidget::new(key.clone(), page_idx, total_pages, w, h);
-            page_widget.update_layout_for_mode(mode);
+            page_widget
+                .update_layout_for_mode(mode, self.scrolled_window.vadjustment().page_size());
             self.content_box.append(&page_widget.container);
             self.page_widgets
                 .borrow_mut()
@@ -256,12 +290,13 @@ impl ReaderView {
             .splice(0..0, new_keys.clone());
 
         let mode = *self.reading_mode.borrow();
+        let viewport_h = self.scrolled_window.vadjustment().page_size();
         let mut prepended_h = 100.0;
         for page_idx in (0..total_pages).rev() {
             let (w, h) = archive.get_dimensions(page_idx);
             let key = &new_keys[page_idx];
             let pw = PageWidget::new(key.clone(), page_idx, total_pages, w, h);
-            pw.update_layout_for_mode(mode);
+            pw.update_layout_for_mode(mode, viewport_h);
             prepended_h += pw.expected_height as f64;
             self.content_box.prepend(&pw.container);
             self.page_widgets.borrow_mut().insert(key.clone(), pw);
@@ -677,6 +712,7 @@ impl ReaderView {
     pub fn set_reading_mode(&self, mode: ReadingMode) {
         *self.reading_mode.borrow_mut() = mode;
         let curr_page_idx = self.get_current_global_page_idx();
+        let viewport_h = self.scrolled_window.vadjustment().page_size();
 
         match mode {
             ReadingMode::ContinuousVertical => {
@@ -696,7 +732,7 @@ impl ReaderView {
 
                 let page_widgets = self.page_widgets.borrow();
                 for pw in page_widgets.values() {
-                    pw.update_layout_for_mode(ReadingMode::ContinuousVertical);
+                    pw.update_layout_for_mode(ReadingMode::ContinuousVertical, viewport_h);
                 }
             }
             ReadingMode::ContinuousHorizontal => {
@@ -716,7 +752,7 @@ impl ReaderView {
 
                 let page_widgets = self.page_widgets.borrow();
                 for pw in page_widgets.values() {
-                    pw.update_layout_for_mode(ReadingMode::ContinuousHorizontal);
+                    pw.update_layout_for_mode(ReadingMode::ContinuousHorizontal, viewport_h);
                 }
             }
         }
@@ -1147,7 +1183,12 @@ impl ReaderView {
 
             // Check if near bottom to auto load next .cbz file (downward scrolling)!
             let last_idx = *last_loaded_idx.borrow();
-            if upper > 0.0 && (value + page_size >= upper - 1500.0) {
+            let lookahead = if reader_c.is_usb_mode() {
+                2500.0
+            } else {
+                1500.0
+            };
+            if upper > 0.0 && (value + page_size >= upper - lookahead) {
                 if let Some(ref series) = *series_clone.borrow() {
                     if last_idx + 1 < series.dir_files.len() {
                         let next_idx = last_idx + 1;
@@ -1253,56 +1294,23 @@ impl ReaderView {
                         .iter()
                         .find(|ch| ch.chapter_id == key.chapter_idx)
                         .and_then(|ch| {
-                            let path = ch.archive.path.clone();
+                            let data = ch.archive.data.clone();
                             ch.archive
                                 .image_entries
                                 .get(key.page_idx)
                                 .cloned()
-                                .map(|entry| (path, entry))
+                                .map(|entry| (data, entry))
                         })
                 };
 
-                if let Some((path, entry_name)) = archive_info {
+                if let Some((archive_data, entry_name)) = archive_info {
                     let tx_c = tx.clone();
                     let key_c = key.clone();
                     let gen_c = generation_id;
 
                     rayon::spawn(move || {
                         let res = (|| -> Result<(u32, u32, Vec<u8>), String> {
-                            let file = std::fs::File::open(&path).map_err(|e| e.to_string())?;
-                            let reader = std::io::BufReader::new(file);
-                            let mut zip =
-                                zip::ZipArchive::new(reader).map_err(|e| e.to_string())?;
-                            let mut entry = zip.by_name(&entry_name).map_err(|e| e.to_string())?;
-
-                            // Reject spoofed header sizes
-                            if entry.size() > MAX_PAGE_FILE_SIZE {
-                                return Err(format!(
-                                    "Entry '{}' declares size exceeding limit ({} > {} bytes)",
-                                    entry_name,
-                                    entry.size(),
-                                    MAX_PAGE_FILE_SIZE
-                                ));
-                            }
-
-                            // Bound initial capacity allocation
-                            let initial_cap =
-                                (entry.size() as usize).min(MAX_PAGE_FILE_SIZE as usize);
-                            let mut buf = Vec::with_capacity(initial_cap);
-
-                            // Bound decompression stream to prevent zip-bomb expansion
-                            let mut limited_reader =
-                                std::io::Read::take(&mut entry, MAX_PAGE_FILE_SIZE + 1);
-                            std::io::Read::read_to_end(&mut limited_reader, &mut buf)
-                                .map_err(|e| e.to_string())?;
-
-                            if buf.len() as u64 > MAX_PAGE_FILE_SIZE {
-                                return Err(format!(
-                                    "Entry '{}' decompressed beyond maximum limit ({} bytes)",
-                                    entry_name, MAX_PAGE_FILE_SIZE
-                                ));
-                            }
-
+                            let buf = CbzArchive::extract_entry_bytes(&archive_data, &entry_name)?;
                             CbzArchive::decode_page_bytes(&buf)
                         })();
 
