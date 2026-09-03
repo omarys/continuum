@@ -66,6 +66,7 @@ pub struct ReaderView {
     pub reading_mode: Rc<RefCell<ReadingMode>>,
     pub generation_id: Rc<RefCell<usize>>,
     pub storage_profile: Rc<RefCell<String>>,
+    pub focused_page_idx: Rc<RefCell<usize>>,
 
     // Channels
     pub tx: Sender<(PageKey, usize, Option<DecodedImagePayload>)>,
@@ -133,6 +134,7 @@ impl ReaderView {
         let reading_mode = Rc::new(RefCell::new(ReadingMode::ContinuousVertical));
         let generation_id = Rc::new(RefCell::new(0));
         let storage_profile = Rc::new(RefCell::new("fast".to_string()));
+        let focused_page_idx = Rc::new(RefCell::new(0));
 
         let (tx, rx) = unbounded::<(PageKey, usize, Option<DecodedImagePayload>)>();
 
@@ -158,31 +160,39 @@ impl ReaderView {
             reading_mode,
             generation_id,
             storage_profile,
+            focused_page_idx,
             tx,
             rx,
         };
 
         reader.setup_scroll_listener();
 
-        // Re-fit page widths to the viewport height whenever it changes
-        // (window resize) while in horizontal/volume mode.
-        let widgets = reader.page_widgets.clone();
-        let mode_rc = reader.reading_mode.clone();
+        // Re-fit page widths and margins whenever the viewport changes
+        // (window resize or adjustment changes) while in horizontal/manga mode.
+        let reader_refit_h = reader.clone();
+        reader
+            .scrolled_window
+            .hadjustment()
+            .connect_page_size_notify(move |_| {
+                reader_refit_h.refit_manga_layout();
+                reader_refit_h.center_focused_page();
+            });
+
+        let reader_refit_v = reader.clone();
         reader
             .scrolled_window
             .vadjustment()
-            .connect_changed(move |adj| {
-                if *mode_rc.borrow() == ReadingMode::ContinuousHorizontal {
-                    let viewport_h = adj.page_size();
-                    if viewport_h > 0.0 {
-                        for pw in widgets.borrow().values() {
-                            pw.update_layout_for_mode(
-                                ReadingMode::ContinuousHorizontal,
-                                viewport_h,
-                            );
-                        }
-                    }
-                }
+            .connect_page_size_notify(move |_| {
+                reader_refit_v.refit_manga_layout();
+                reader_refit_v.center_focused_page();
+            });
+
+        let reader_refit_ch = reader.clone();
+        reader
+            .scrolled_window
+            .vadjustment()
+            .connect_changed(move |_| {
+                reader_refit_ch.refit_manga_layout();
             });
 
         reader
@@ -244,6 +254,8 @@ impl ReaderView {
         self.content_box.append(&banner);
 
         let mode = *self.reading_mode.borrow();
+        let viewport_h = self.get_viewport_height();
+        let viewport_w = self.get_viewport_width();
         for page_idx in 0..total_pages {
             let (w, h) = archive.get_dimensions(page_idx);
             let key = PageKey {
@@ -251,8 +263,7 @@ impl ReaderView {
                 page_idx,
             };
             let page_widget = PageWidget::new(key.clone(), page_idx, total_pages, w, h);
-            page_widget
-                .update_layout_for_mode(mode, self.scrolled_window.vadjustment().page_size());
+            page_widget.update_layout_for_mode(mode, viewport_w, viewport_h);
             self.content_box.append(&page_widget.container);
             self.page_widgets
                 .borrow_mut()
@@ -268,35 +279,37 @@ impl ReaderView {
 
         *self.last_loaded_series_idx.borrow_mut() = series_idx;
 
+        if mode == ReadingMode::ContinuousHorizontal {
+            self.refit_manga_layout();
+        }
+
         Ok(())
     }
 
     fn prepend_chapter(&self, archive: CbzArchive, series_idx: usize) -> Result<f64, String> {
-        let prev_chap_id = *self.next_chapter_id.borrow();
-        *self.next_chapter_id.borrow_mut() += 1;
-
+        let prev_chap_id = self.chapters.borrow().first().map_or(1, |c| c.chapter_id) + 1;
         let total_pages = archive.page_count();
 
-        let mut new_keys = Vec::with_capacity(total_pages);
-        for page_idx in 0..total_pages {
-            new_keys.push(PageKey {
+        let new_keys: Vec<PageKey> = (0..total_pages)
+            .map(|page_idx| PageKey {
                 chapter_idx: prev_chap_id,
                 page_idx,
-            });
-        }
+            })
+            .collect();
 
         self.global_to_key
             .borrow_mut()
             .splice(0..0, new_keys.clone());
 
         let mode = *self.reading_mode.borrow();
-        let viewport_h = self.scrolled_window.vadjustment().page_size();
+        let viewport_h = self.get_viewport_height();
+        let viewport_w = self.get_viewport_width();
         let mut prepended_h = 100.0;
         for page_idx in (0..total_pages).rev() {
             let (w, h) = archive.get_dimensions(page_idx);
             let key = &new_keys[page_idx];
             let pw = PageWidget::new(key.clone(), page_idx, total_pages, w, h);
-            pw.update_layout_for_mode(mode, viewport_h);
+            pw.update_layout_for_mode(mode, viewport_w, viewport_h);
             prepended_h += pw.expected_height as f64;
             self.content_box.prepend(&pw.container);
             self.page_widgets.borrow_mut().insert(key.clone(), pw);
@@ -315,6 +328,10 @@ impl ReaderView {
         );
 
         *self.first_loaded_series_idx.borrow_mut() = series_idx;
+
+        if mode == ReadingMode::ContinuousHorizontal {
+            self.refit_manga_layout();
+        }
 
         Ok(prepended_h)
     }
@@ -410,6 +427,13 @@ impl ReaderView {
         let is_animating = self.is_animating.clone();
         let hadj = hadj.clone();
 
+        let global_to_key = self.global_to_key.clone();
+        let page_widgets = self.page_widgets.clone();
+        let chapters = self.chapters.clone();
+        let in_flight = self.in_flight.clone();
+        let tx = self.tx.clone();
+        let generation_id = self.generation_id.clone();
+
         self.scrolled_window.add_tick_callback(move |_, _| {
             let cur = hadj.value();
             let tgt = match *target_x.borrow() {
@@ -419,6 +443,31 @@ impl ReaderView {
                     return glib::ControlFlow::Break;
                 }
             };
+
+            let upr = hadj.upper();
+            let psz = hadj.page_size();
+            let total_global = global_to_key.borrow().len();
+
+            // Continuously request image decodes for live viewport on EVERY VSYNC frame
+            if total_global > 0 {
+                let current_global_idx = if cur <= 10.0 || upr <= psz {
+                    0
+                } else {
+                    let max_s = (upr - psz).max(1.0);
+                    let prog = (cur / max_s).clamp(0.0, 1.0);
+                    ((prog * (total_global as f64)) as usize).min(total_global.saturating_sub(1))
+                };
+                let gen = *generation_id.borrow();
+                Self::dispatch_requests_around(
+                    current_global_idx,
+                    &global_to_key,
+                    &page_widgets,
+                    &chapters,
+                    &in_flight,
+                    &tx,
+                    gen,
+                );
+            }
 
             let diff = tgt - cur;
             if diff.abs() < 0.25 {
@@ -461,25 +510,35 @@ impl ReaderView {
                 let hadj = self.scrolled_window.hadjustment();
                 let val = hadj.value();
                 let psz = hadj.page_size();
+                let upr = hadj.upper();
                 let center_x = val + psz / 2.0;
 
                 let page_widgets = self.page_widgets.borrow();
-                let mut closest_idx = 0;
+                let mut closest_idx = None;
                 let mut min_dist = f64::MAX;
 
                 for (idx, key) in global_to_key.iter().enumerate() {
                     if let Some(pw) = page_widgets.get(key) {
-                        if let Some(rect) = pw.container.compute_bounds(&self.content_box) {
+                        if let Some(rect) = pw.container.compute_bounds(&self.clamp) {
                             let pw_center = rect.x() as f64 + rect.width() as f64 / 2.0;
                             let dist = (pw_center - center_x).abs();
                             if dist < min_dist {
                                 min_dist = dist;
-                                closest_idx = idx;
+                                closest_idx = Some(idx);
                             }
                         }
                     }
                 }
-                closest_idx
+
+                if let Some(idx) = closest_idx {
+                    idx
+                } else if val <= 10.0 || upr <= psz {
+                    0
+                } else {
+                    let max_scroll = (upr - psz).max(1.0);
+                    let progress = (val / max_scroll).clamp(0.0, 1.0);
+                    ((progress * (total as f64)) as usize).min(total.saturating_sub(1))
+                }
             }
         }
     }
@@ -501,6 +560,9 @@ impl ReaderView {
 
         let clamped = page.min(initial_page_count);
         let idx = (clamped - 1).min(initial_page_count.saturating_sub(1));
+
+        *self.focused_page_idx.borrow_mut() = idx;
+        self.request_pages_around(idx);
 
         // If jumping to near or at the end of the initial chapter, also pre-load the next chapter
         if clamped >= initial_page_count.saturating_sub(1) {
@@ -541,19 +603,24 @@ impl ReaderView {
 
         match *self.reading_mode.borrow() {
             ReadingMode::ContinuousVertical => {
-                if let Some(rect) = pw.container.compute_bounds(&self.content_box) {
-                    self.smooth_scroll_to(rect.y() as f64);
+                if let Some(rect) = pw.container.compute_bounds(&self.clamp) {
+                    let vadj = self.scrolled_window.vadjustment();
+                    vadj.set_value(rect.y() as f64);
+                    self.request_pages_around(idx);
                     true
                 } else {
                     false
                 }
             }
             ReadingMode::ContinuousHorizontal => {
-                if let Some(rect) = pw.container.compute_bounds(&self.content_box) {
+                if let Some(rect) = pw.container.compute_bounds(&self.clamp) {
+                    *self.focused_page_idx.borrow_mut() = idx;
                     let hadj = self.scrolled_window.hadjustment();
                     let target_x =
                         rect.x() as f64 + rect.width() as f64 / 2.0 - hadj.page_size() / 2.0;
-                    self.smooth_scroll_to_x(target_x);
+                    hadj.set_value(target_x.max(0.0));
+                    self.update_focus_styles(idx);
+                    self.request_pages_around(idx);
                     true
                 } else {
                     false
@@ -580,7 +647,7 @@ impl ReaderView {
                 let mut best = f64::MAX;
                 for (i, key) in global_to_key.iter().enumerate() {
                     if let Some(pw) = widgets.get(key) {
-                        if let Some(rect) = pw.container.compute_bounds(&self.content_box) {
+                        if let Some(rect) = pw.container.compute_bounds(&self.clamp) {
                             let top = rect.y() as f64;
                             let bottom = top + rect.height() as f64;
                             if center >= top && center < bottom {
@@ -603,7 +670,7 @@ impl ReaderView {
                 let mut best = f64::MAX;
                 for (i, key) in global_to_key.iter().enumerate() {
                     if let Some(pw) = widgets.get(key) {
-                        if let Some(rect) = pw.container.compute_bounds(&self.content_box) {
+                        if let Some(rect) = pw.container.compute_bounds(&self.clamp) {
                             let left = rect.x() as f64;
                             let right = left + rect.width() as f64;
                             if center_x >= left && center_x < right {
@@ -678,7 +745,7 @@ impl ReaderView {
                 continue;
             }
             let Some(pw) = widgets.get(key) else { continue };
-            let Some(rect) = pw.container.compute_bounds(&self.content_box) else {
+            let Some(rect) = pw.container.compute_bounds(&self.clamp) else {
                 continue;
             };
             if vertical {
@@ -700,6 +767,122 @@ impl ReaderView {
         (last_page, completed)
     }
 
+    pub fn get_viewport_height(&self) -> f64 {
+        let h = self.scrolled_window.height() as f64;
+        if h > 50.0 {
+            h
+        } else {
+            let v_psz = self.scrolled_window.vadjustment().page_size();
+            if v_psz > 50.0 {
+                v_psz
+            } else {
+                900.0
+            }
+        }
+    }
+
+    pub fn get_viewport_width(&self) -> f64 {
+        let w = self.scrolled_window.width() as f64;
+        if w > 50.0 {
+            w
+        } else {
+            let h_psz = self.scrolled_window.hadjustment().page_size();
+            if h_psz > 50.0 {
+                h_psz
+            } else {
+                1200.0
+            }
+        }
+    }
+
+    pub fn get_active_aspect_ratio(&self) -> Option<f64> {
+        let global_to_key = self.global_to_key.borrow();
+        if global_to_key.is_empty() {
+            return None;
+        }
+        let cur_idx = self.get_current_global_page_idx();
+        let key = global_to_key
+            .get(cur_idx)
+            .or_else(|| global_to_key.first())?;
+        let page_widgets = self.page_widgets.borrow();
+        let pw = page_widgets.get(key)?;
+        let (w, h) = pw.get_dimensions();
+        if w > 0 && h > 0 {
+            Some(h as f64 / w as f64)
+        } else {
+            None
+        }
+    }
+
+    pub fn refit_manga_layout(&self) {
+        if *self.reading_mode.borrow() != ReadingMode::ContinuousHorizontal {
+            return;
+        }
+
+        let viewport_h = self.get_viewport_height();
+        let viewport_w = self.get_viewport_width();
+        let widgets = self.page_widgets.borrow();
+        for pw in widgets.values() {
+            pw.update_layout_for_mode(ReadingMode::ContinuousHorizontal, viewport_w, viewport_h);
+        }
+
+        if viewport_w > 0.0 {
+            let margin = (viewport_w / 2.0).ceil() as i32;
+            self.content_box.set_margin_start(margin);
+            self.content_box.set_margin_end(margin);
+        }
+        let cur_idx = *self.focused_page_idx.borrow();
+        self.update_focus_styles(cur_idx);
+    }
+
+    /// Keeps the current focused page precisely centered in the viewport during window resize
+    pub fn center_focused_page(&self) {
+        if *self.reading_mode.borrow() != ReadingMode::ContinuousHorizontal {
+            return;
+        }
+
+        let cur_idx = *self.focused_page_idx.borrow();
+        let global_to_key = self.global_to_key.borrow();
+        if let Some(key) = global_to_key.get(cur_idx) {
+            let page_widgets = self.page_widgets.borrow();
+            if let Some(pw) = page_widgets.get(key) {
+                if let Some(rect) = pw.container.compute_bounds(&self.clamp) {
+                    let page_x = rect.x() as f64;
+                    let page_w = rect.width() as f64;
+                    let viewport_w = self.scrolled_window.hadjustment().page_size();
+                    if viewport_w > 0.0 {
+                        let target_x = (page_x - (viewport_w - page_w) / 2.0).max(0.0);
+                        self.scrolled_window.hadjustment().set_value(target_x);
+                    }
+                }
+            }
+        }
+        self.update_focus_styles(cur_idx);
+    }
+
+    pub fn update_focus_styles(&self, focused_idx: usize) {
+        if *self.reading_mode.borrow() != ReadingMode::ContinuousHorizontal {
+            return;
+        }
+
+        let global_to_key = self.global_to_key.borrow();
+        let widgets = self.page_widgets.borrow();
+
+        for (idx, key) in global_to_key.iter().enumerate() {
+            if let Some(pw) = widgets.get(key) {
+                if idx == focused_idx {
+                    if !pw.container.has_css_class("manga-page-focused") {
+                        pw.container.remove_css_class("manga-page-side");
+                        pw.container.add_css_class("manga-page-focused");
+                    }
+                } else if !pw.container.has_css_class("manga-page-side") {
+                    pw.container.remove_css_class("manga-page-focused");
+                    pw.container.add_css_class("manga-page-side");
+                }
+            }
+        }
+    }
+
     pub fn toggle_reading_mode(&self) {
         let current = *self.reading_mode.borrow();
         let new_mode = match current {
@@ -712,7 +895,8 @@ impl ReaderView {
     pub fn set_reading_mode(&self, mode: ReadingMode) {
         *self.reading_mode.borrow_mut() = mode;
         let curr_page_idx = self.get_current_global_page_idx();
-        let viewport_h = self.scrolled_window.vadjustment().page_size();
+        let viewport_h = self.get_viewport_height();
+        let viewport_w = self.get_viewport_width();
 
         match mode {
             ReadingMode::ContinuousVertical => {
@@ -720,6 +904,8 @@ impl ReaderView {
                 self.content_box.set_vexpand(false);
                 self.content_box.set_valign(Align::Fill);
                 self.content_box.set_spacing(0);
+                self.content_box.set_margin_start(0);
+                self.content_box.set_margin_end(0);
                 self.scrolled_window
                     .set_hscrollbar_policy(gtk4::PolicyType::Never);
                 self.scrolled_window
@@ -732,14 +918,20 @@ impl ReaderView {
 
                 let page_widgets = self.page_widgets.borrow();
                 for pw in page_widgets.values() {
-                    pw.update_layout_for_mode(ReadingMode::ContinuousVertical, viewport_h);
+                    pw.container.remove_css_class("manga-page-focused");
+                    pw.container.remove_css_class("manga-page-side");
+                    pw.update_layout_for_mode(
+                        ReadingMode::ContinuousVertical,
+                        viewport_w,
+                        viewport_h,
+                    );
                 }
             }
             ReadingMode::ContinuousHorizontal => {
                 self.content_box.set_orientation(Orientation::Horizontal);
                 self.content_box.set_vexpand(true);
                 self.content_box.set_valign(Align::Fill);
-                self.content_box.set_spacing(24);
+                self.content_box.set_spacing(20);
                 self.scrolled_window
                     .set_hscrollbar_policy(gtk4::PolicyType::Automatic);
                 self.scrolled_window
@@ -750,10 +942,8 @@ impl ReaderView {
                 self.clamp.set_valign(Align::Fill);
                 self.scrolled_window.add_css_class("manga-fade-overlay");
 
-                let page_widgets = self.page_widgets.borrow();
-                for pw in page_widgets.values() {
-                    pw.update_layout_for_mode(ReadingMode::ContinuousHorizontal, viewport_h);
-                }
+                self.refit_manga_layout();
+                self.update_focus_styles(curr_page_idx);
             }
         }
 
@@ -770,23 +960,26 @@ impl ReaderView {
             return;
         }
 
+        *self.focused_page_idx.borrow_mut() = global_idx;
+
         let key = &global_to_key[global_idx];
         let page_widgets = self.page_widgets.borrow();
         if let Some(pw) = page_widgets.get(key) {
             let mode = *self.reading_mode.borrow();
             match mode {
                 ReadingMode::ContinuousVertical => {
-                    if let Some(rect) = pw.container.compute_bounds(&self.content_box) {
+                    if let Some(rect) = pw.container.compute_bounds(&self.clamp) {
                         self.smooth_scroll_to(rect.y() as f64);
                     }
                 }
                 ReadingMode::ContinuousHorizontal => {
-                    if let Some(rect) = pw.container.compute_bounds(&self.content_box) {
+                    if let Some(rect) = pw.container.compute_bounds(&self.clamp) {
                         let page_x = rect.x() as f64;
                         let page_w = rect.width() as f64;
                         let viewport_w = self.scrolled_window.hadjustment().page_size();
                         let target_x = page_x - (viewport_w - page_w) / 2.0;
                         self.smooth_scroll_to_x(target_x);
+                        self.update_focus_styles(global_idx);
                     }
                 }
             }
@@ -882,7 +1075,7 @@ impl ReaderView {
         let mut current_chap_idx = 0;
         let mut current_chap_y = 0.0;
         for (i, chap) in chapters.iter().enumerate() {
-            if let Some(rect) = chap.banner_widget.compute_bounds(&self.content_box) {
+            if let Some(rect) = chap.banner_widget.compute_bounds(&self.clamp) {
                 let y = rect.y() as f64;
                 if y <= current_y + 150.0 {
                     current_chap_idx = i;
@@ -895,7 +1088,7 @@ impl ReaderView {
             if current_chap_idx > 0 {
                 if let Some(rect) = chapters[current_chap_idx - 1]
                     .banner_widget
-                    .compute_bounds(&self.content_box)
+                    .compute_bounds(&self.clamp)
                 {
                     let target_y = rect.y() as f64;
                     self.smooth_scroll_to(target_y);
@@ -934,7 +1127,7 @@ impl ReaderView {
             ReadingMode::ContinuousVertical => {
                 let page_widgets = self.page_widgets.borrow();
                 if let Some(pw) = page_widgets.get(&global_to_key[last_idx]) {
-                    if let Some(rect) = pw.container.compute_bounds(&self.content_box) {
+                    if let Some(rect) = pw.container.compute_bounds(&self.clamp) {
                         let viewport = self.scrolled_window.vadjustment().page_size();
                         let target = (rect.y() as f64 + rect.height() as f64 - viewport).max(0.0);
                         self.smooth_scroll_to(target);
@@ -959,7 +1152,7 @@ impl ReaderView {
             .unwrap_or_else(|| self.scrolled_window.vadjustment().value());
         let mut current_chap_idx = 0;
         for (i, chap) in chapters.iter().enumerate() {
-            if let Some(rect) = chap.banner_widget.compute_bounds(&self.content_box) {
+            if let Some(rect) = chap.banner_widget.compute_bounds(&self.clamp) {
                 let y = rect.y() as f64;
                 if y <= current_y + 150.0 {
                     current_chap_idx = i;
@@ -971,7 +1164,7 @@ impl ReaderView {
         if target_chap_idx < chapters.len() {
             if let Some(rect) = chapters[target_chap_idx]
                 .banner_widget
-                .compute_bounds(&self.content_box)
+                .compute_bounds(&self.clamp)
             {
                 let target_y = rect.y() as f64;
                 self.smooth_scroll_to(target_y);
@@ -988,7 +1181,7 @@ impl ReaderView {
                             let chapters = self.chapters.borrow();
                             if let Some(last_chap) = chapters.last() {
                                 if let Some(rect) =
-                                    last_chap.banner_widget.compute_bounds(&self.content_box)
+                                    last_chap.banner_widget.compute_bounds(&self.clamp)
                                 {
                                     let target_y = rect.y() as f64;
                                     self.smooth_scroll_to(target_y);
@@ -1014,7 +1207,7 @@ impl ReaderView {
         let mut current_chap_idx = 0;
         let mut current_chap_y = 0.0;
         for (i, chap) in chapters.iter().enumerate() {
-            if let Some(rect) = chap.banner_widget.compute_bounds(&self.content_box) {
+            if let Some(rect) = chap.banner_widget.compute_bounds(&self.clamp) {
                 let y = rect.y() as f64;
                 if y <= current_y + 150.0 {
                     current_chap_idx = i;
@@ -1032,7 +1225,7 @@ impl ReaderView {
             let prev_chap_idx = current_chap_idx - 1;
             if let Some(rect) = chapters[prev_chap_idx]
                 .banner_widget
-                .compute_bounds(&self.content_box)
+                .compute_bounds(&self.clamp)
             {
                 let target_y = rect.y() as f64;
                 self.smooth_scroll_to(target_y);
@@ -1071,6 +1264,7 @@ impl ReaderView {
 
         let rx = self.rx.clone();
         let tx = self.tx.clone();
+        let reader_c = self.clone();
 
         // Continuously process completed background image decodes at 60FPS on GTK main loop
         let page_widgets_rx = page_widgets.clone();
@@ -1106,19 +1300,29 @@ impl ReaderView {
                                 let page_to_global =
                                     |k: &PageKey| g2k_map.iter().position(|x| x == k).unwrap_or(0);
 
-                                // Compute live viewport global index right now
-                                let val = vadj_rx.value();
-                                let upr = vadj_rx.upper();
-                                let psz = vadj_rx.page_size();
-                                let total_g = g2k_map.len();
+                                // Compute live viewport global index right now accurately for reading mode
+                                let live_global_idx = {
+                                    let mode = *reader_c.reading_mode.borrow();
+                                    match mode {
+                                        ReadingMode::ContinuousVertical => {
+                                            let val = vadj_rx.value();
+                                            let upr = vadj_rx.upper();
+                                            let psz = vadj_rx.page_size();
+                                            let total_g = g2k_map.len();
 
-                                let live_global_idx = if val <= 10.0 || upr <= psz || total_g == 0 {
-                                    0
-                                } else {
-                                    let max_s = (upr - psz).max(1.0);
-                                    let prog = (val / max_s).clamp(0.0, 1.0);
-                                    ((prog * (total_g as f64)) as usize)
-                                        .min(total_g.saturating_sub(1))
+                                            if val <= 10.0 || upr <= psz || total_g == 0 {
+                                                0
+                                            } else {
+                                                let max_s = (upr - psz).max(1.0);
+                                                let prog = (val / max_s).clamp(0.0, 1.0);
+                                                ((prog * (total_g as f64)) as usize)
+                                                    .min(total_g.saturating_sub(1))
+                                            }
+                                        }
+                                        ReadingMode::ContinuousHorizontal => {
+                                            reader_c.get_current_global_page_idx()
+                                        }
+                                    }
                                 };
 
                                 let evicted = memory_manager_rx.borrow_mut().insert(
@@ -1154,8 +1358,11 @@ impl ReaderView {
             glib::ControlFlow::Continue
         });
 
-        let reader_c = self.clone();
+        let reader_c2 = self.clone();
         vadjustment.connect_value_changed(move |adj| {
+            if *reader_c2.reading_mode.borrow() != ReadingMode::ContinuousVertical {
+                return;
+            }
             let value = adj.value();
             let page_size = adj.page_size();
             let upper = adj.upper();
@@ -1170,7 +1377,7 @@ impl ReaderView {
                 if let Some(ref series) = *series_clone.borrow() {
                     let prev_idx = first_idx - 1;
                     if let Ok(archive) = CbzArchive::open(&series.dir_files[prev_idx]) {
-                        if let Ok(prepended_h) = reader_c.prepend_chapter(archive, prev_idx) {
+                        if let Ok(prepended_h) = reader_c2.prepend_chapter(archive, prev_idx) {
                             let adj_c = adj.clone();
                             glib::idle_add_local(move || {
                                 adj_c.set_value(value + prepended_h);
@@ -1183,7 +1390,7 @@ impl ReaderView {
 
             // Check if near bottom to auto load next .cbz file (downward scrolling)!
             let last_idx = *last_loaded_idx.borrow();
-            let lookahead = if reader_c.is_usb_mode() {
+            let lookahead = if reader_c2.is_usb_mode() {
                 2500.0
             } else {
                 1500.0
@@ -1193,7 +1400,7 @@ impl ReaderView {
                     if last_idx + 1 < series.dir_files.len() {
                         let next_idx = last_idx + 1;
                         if let Ok(archive) = CbzArchive::open(&series.dir_files[next_idx]) {
-                            let _ = reader_c.append_chapter(archive, next_idx);
+                            let _ = reader_c2.append_chapter(archive, next_idx);
                         }
                     }
                 }
@@ -1213,7 +1420,7 @@ impl ReaderView {
                 ((progress * (total_global as f64)) as usize).min(total_global.saturating_sub(1))
             };
 
-            let gen = *reader_c.generation_id.borrow();
+            let gen = *reader_c2.generation_id.borrow();
             Self::dispatch_requests_around(
                 current_global_idx,
                 &global_to_key,
@@ -1221,6 +1428,40 @@ impl ReaderView {
                 &chapters,
                 &in_flight,
                 &tx,
+                gen,
+            );
+        });
+
+        let hadjustment = self.scrolled_window.hadjustment();
+        let reader_h = self.clone();
+        let global_to_key_h = self.global_to_key.clone();
+        let page_widgets_h = self.page_widgets.clone();
+        let chapters_h = self.chapters.clone();
+        let in_flight_h = self.in_flight.clone();
+        let tx_h = self.tx.clone();
+        let generation_id_h = self.generation_id.clone();
+
+        hadjustment.connect_value_changed(move |_adj| {
+            if *reader_h.reading_mode.borrow() != ReadingMode::ContinuousHorizontal {
+                return;
+            }
+
+            let total_global = global_to_key_h.borrow().len();
+            if total_global == 0 {
+                return;
+            }
+
+            let current_global_idx = reader_h.get_current_global_page_idx();
+            reader_h.update_focus_styles(current_global_idx);
+
+            let gen = *generation_id_h.borrow();
+            Self::dispatch_requests_around(
+                current_global_idx,
+                &global_to_key_h,
+                &page_widgets_h,
+                &chapters_h,
+                &in_flight_h,
+                &tx_h,
                 gen,
             );
         });
@@ -1348,6 +1589,8 @@ impl ReaderView {
         // Reset scroll before clearing to prevent position drift
         let vadj = self.scrolled_window.vadjustment();
         vadj.set_value(0.0);
+        let hadj = self.scrolled_window.hadjustment();
+        hadj.set_value(0.0);
 
         while let Some(child) = self.content_box.first_child() {
             self.content_box.remove(&child);
@@ -1365,6 +1608,8 @@ impl ReaderView {
         *self.next_chapter_id.borrow_mut() = 0;
         *self.last_vadj_value.borrow_mut() = 0.0;
         *self.target_y.borrow_mut() = None;
+        *self.target_x.borrow_mut() = None;
+        *self.focused_page_idx.borrow_mut() = 0;
         *self.is_animating.borrow_mut() = false;
 
         self.content_box.set_visible(false);

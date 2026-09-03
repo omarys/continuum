@@ -5,3 +5,8 @@ rust-analyzer = "latest"
 
 [env]
 RUST_LOG = "info"
+
+[tasks.in]
+description = "Build and install Continuum"
+depends = ["build"]
+run = "./install.sh"

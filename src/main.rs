@@ -147,9 +147,9 @@ fn open_window(
 
     let manhwa_window = ManhwaWindow::new(app);
     if let Some(m) = mode {
-        manhwa_window
-            .reader
-            .set_reading_mode(crate::ui::page_widget::ReadingMode::from_str_loose(m));
+        let reading_mode = crate::ui::page_widget::ReadingMode::from_str_loose(m);
+        manhwa_window.reader.set_reading_mode(reading_mode);
+        manhwa_window.update_window_size_for_mode(reading_mode);
     }
     if let Some(prof) = storage_profile {
         manhwa_window.reader.set_storage_profile(prof);
@@ -165,6 +165,8 @@ fn open_window(
     }
     if let Some(p) = path.filter(|p| p.exists()) {
         let _ = manhwa_window.reader.load_initial_file(p);
+        let mode = *manhwa_window.reader.reading_mode.borrow();
+        manhwa_window.update_window_size_for_mode(mode);
         if let Some(page) = page.filter(|p| *p > 0) {
             manhwa_window.reader.jump_to_page(page as usize);
         }
@@ -220,6 +222,71 @@ mod tests {
         assert_eq!(filter_args(&raw2), vec!["continuum".to_string()]);
         assert_eq!(parse_cli_args(&raw2).page, None);
     }
+
+    #[test]
+    fn test_load_custom_styles() {
+        if gtk4::init().is_err() {
+            return;
+        }
+        load_custom_styles();
+    }
+
+    #[test]
+    fn test_manga_page_centering() {
+        if gtk4::init().is_err() {
+            return;
+        }
+        let file = std::path::PathBuf::from(
+            "/home/omary/Documents/Dewey/Manga/Action/Dandadan/[0245]_Chapter_1.cbz",
+        );
+        if !file.exists() {
+            return;
+        }
+        let app = libadwaita::Application::builder()
+            .application_id("dev.continuum.centering_test")
+            .build();
+        let manhwa_window = ManhwaWindow::new(&app);
+        manhwa_window
+            .reader
+            .set_reading_mode(crate::ui::page_widget::ReadingMode::ContinuousHorizontal);
+        manhwa_window
+            .update_window_size_for_mode(crate::ui::page_widget::ReadingMode::ContinuousHorizontal);
+        manhwa_window.window.present();
+        manhwa_window.reader.load_initial_file(file).unwrap();
+
+        let ctx = glib::MainContext::default();
+        for _ in 0..50 {
+            ctx.iteration(false);
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+
+        let reader = &manhwa_window.reader;
+        let hadj = reader.scrolled_window.hadjustment();
+
+        let g2k = reader.global_to_key.borrow();
+        let widgets = reader.page_widgets.borrow();
+        for page_num in [0, 1, 2, 3, 4] {
+            if let Some(key) = g2k.get(page_num) {
+                if let Some(pw) = widgets.get(key) {
+                    *reader.focused_page_idx.borrow_mut() = page_num;
+                    reader.center_focused_page();
+
+                    let b_clamp = pw.container.compute_bounds(&reader.clamp).unwrap();
+                    let page_center_in_clamp = b_clamp.x() as f64 + b_clamp.width() as f64 / 2.0;
+                    let page_center_on_screen = page_center_in_clamp - hadj.value();
+                    let viewport_center = hadj.page_size() / 2.0;
+
+                    assert!(
+                        (page_center_on_screen - viewport_center).abs() <= 1.0,
+                        "Page {} must be centered: center_on_screen={}, viewport_center={}",
+                        page_num,
+                        page_center_on_screen,
+                        viewport_center
+                    );
+                }
+            }
+        }
+    }
 }
 
 fn load_custom_styles() {
@@ -272,13 +339,29 @@ fn load_custom_styles() {
             background-color: #121212;
         }
 
+        /* Manga horizontal reading mode: edge vignette shadow casting over side peek pages */
+        scrolledwindow.manga-fade-overlay {
+            background-color: #0c0c0e;
+            box-shadow: inset 80px 0 60px -30px rgba(0, 0, 0, 0.95),
+                        inset -80px 0 60px -30px rgba(0, 0, 0, 0.95);
+        }
+
         .manga-page {
             margin: 0;
             padding: 0;
-            border-left: 2px solid #2e2e42;
-            border-right: 2px solid #2e2e42;
-            border-radius: 6px;
-            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.7);
+            border-radius: 4px;
+            box-shadow: 0 6px 24px rgba(0, 0, 0, 0.75);
+            transition: opacity 220ms ease, box-shadow 220ms ease;
+        }
+
+        .manga-page-focused {
+            opacity: 1.0;
+            box-shadow: 0 16px 52px rgba(0, 0, 0, 0.95), 0 0 0 1px rgba(255, 255, 255, 0.12);
+        }
+
+        .manga-page-side {
+            opacity: 0.35;
+            box-shadow: 0 4px 16px rgba(0, 0, 0, 0.85);
         }
     "#;
 

@@ -21,7 +21,10 @@ impl ManhwaWindow {
             .icon_name("dev.continuum.ManhwaReader")
             .build();
 
-        // Calculate screen height & screen width <= 60%
+        window.unmaximize();
+        window.unfullscreen();
+
+        // Sized to full height of the screen minus panel headroom, with focused width
         if let Some(display) = gdk4::Display::default() {
             let monitors = display.monitors();
             if let Some(monitor_item) = monitors.item(0) {
@@ -30,9 +33,10 @@ impl ManhwaWindow {
                     let screen_w = geom.width();
                     let screen_h = geom.height();
 
-                    // Max 60% width, full height by default
-                    let target_w = ((screen_w as f64) * 0.58) as i32;
-                    let target_h = screen_h;
+                    // Full height minus GNOME panel / taskbar headroom (~64px) to prevent auto-maximize
+                    let avail_h = (screen_h - 64).max(500);
+                    let target_w = ((screen_w as f64) * 0.44).clamp(420.0, 850.0) as i32;
+                    let target_h = avail_h;
 
                     window.set_default_size(target_w, target_h);
                 }
@@ -78,9 +82,12 @@ impl ManhwaWindow {
         toolbar_view.set_content(Some(&reader.container));
         window.set_content(Some(&toolbar_view));
 
+        let mode_btn_window = window.clone();
         let reader_mode = reader.clone();
         mode_btn.connect_clicked(move |_| {
             reader_mode.toggle_reading_mode();
+            let mode = *reader_mode.reading_mode.borrow();
+            ManhwaWindow::update_window_size_with_window(&mode_btn_window, &reader_mode, mode);
         });
 
         let win_help = window.clone();
@@ -111,6 +118,54 @@ impl ManhwaWindow {
         window_struct
     }
 
+    pub fn update_window_size_for_mode(&self, mode: crate::ui::page_widget::ReadingMode) {
+        Self::update_window_size_with_window(&self.window, &self.reader, mode);
+    }
+
+    pub fn update_window_size_with_window(
+        window: &ApplicationWindow,
+        reader: &ReaderView,
+        mode: crate::ui::page_widget::ReadingMode,
+    ) {
+        window.unmaximize();
+        window.unfullscreen();
+
+        if let Some(display) = gdk4::Display::default() {
+            let monitors = display.monitors();
+            if let Some(monitor_item) = monitors.item(0) {
+                if let Ok(monitor) = monitor_item.downcast::<gdk4::Monitor>() {
+                    let geom = monitor.geometry();
+                    let screen_w = geom.width();
+                    let screen_h = geom.height();
+
+                    // Full height minus GNOME panel / taskbar headroom (~64px) to prevent auto-maximize
+                    let avail_h = (screen_h - 64).max(500);
+                    let target_h = avail_h;
+
+                    match mode {
+                        crate::ui::page_widget::ReadingMode::ContinuousVertical => {
+                            let target_w = ((screen_w as f64) * 0.52).clamp(480.0, 950.0) as i32;
+                            window.set_default_size(target_w, target_h);
+                        }
+                        crate::ui::page_widget::ReadingMode::ContinuousHorizontal => {
+                            // Viewport height inside window (accounting for header bar ~48px)
+                            let viewport_h = (avail_h - 50).max(380) as f64;
+                            let aspect = reader.get_active_aspect_ratio().unwrap_or(1.42);
+                            let page_w = viewport_h / aspect;
+                            let spacing = 16.0;
+                            // Narrow default: subtle peek portion (~7%) of previous and next pages on either side
+                            let peek_portion = page_w * 0.07;
+                            let content_w = page_w + (2.0 * peek_portion) + (spacing * 2.0);
+                            let max_w = (screen_w as f64 * 0.82) as i32;
+                            let target_w = (content_w as i32).clamp(380, max_w);
+                            window.set_default_size(target_w, target_h);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     fn setup_actions(&self, open_btn: gtk4::Button) {
         let win_clone = self.window.clone();
         let reader_clone = self.reader.clone();
@@ -132,11 +187,19 @@ impl ManhwaWindow {
                 .build();
 
             let reader = reader_clone.clone();
+            let win_for_open = win_clone.clone();
             dialog.open(Some(&win_clone), gio::Cancellable::NONE, move |result| {
                 if let Ok(file) = result {
                     if let Some(path) = file.path() {
                         if let Err(e) = reader.load_initial_file(path) {
                             eprintln!("Error loading file: {}", e);
+                        } else {
+                            let mode = *reader.reading_mode.borrow();
+                            ManhwaWindow::update_window_size_with_window(
+                                &win_for_open,
+                                &reader,
+                                mode,
+                            );
                         }
                     }
                 }
@@ -200,6 +263,8 @@ impl ManhwaWindow {
             // Toggle Reading Mode (m / M)
             if !has_ctrl && (keyval == gdk4::Key::m || keyval == gdk4::Key::M) {
                 reader_key.toggle_reading_mode();
+                let mode = *reader_key.reading_mode.borrow();
+                ManhwaWindow::update_window_size_with_window(&win_key, &reader_key, mode);
                 return glib::Propagation::Stop;
             }
 
