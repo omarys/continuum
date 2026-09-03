@@ -115,9 +115,9 @@ fn main() -> glib::ExitCode {
         );
     });
 
-    let cli_file_open = cli_file.clone();
-    let cli_mode_open = cli_mode.clone();
-    let cli_profile_open = cli_storage_profile.clone();
+    let cli_file_open = cli_file;
+    let cli_mode_open = cli_mode;
+    let cli_profile_open = cli_storage_profile;
     app.connect_open(move |app, files, _| {
         let positional = files.first().and_then(|f| f.path());
         let path = cli_file_open.as_ref().clone().or(positional);

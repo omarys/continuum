@@ -95,10 +95,9 @@ impl ManhwaWindow {
             show_shortcuts_dialog(&win_help);
         });
 
-        let header_bar_clone = header_bar.clone();
         window.connect_fullscreened_notify(move |win| {
             let is_fullscreen = win.is_fullscreen();
-            header_bar_clone.set_visible(!is_fullscreen);
+            header_bar.set_visible(!is_fullscreen);
         });
 
         let window_struct = Self { window, reader };
@@ -223,7 +222,7 @@ impl ManhwaWindow {
         self.reader.container.add_controller(gesture);
 
         let key_controller = gtk4::EventControllerKey::new();
-        let open_cb3 = open_file_rc.clone();
+        let open_cb3 = open_file_rc;
         let reader_key = self.reader.clone();
         let win_key = self.window.clone();
         let last_g_time = Rc::new(RefCell::new(None::<std::time::Instant>));
@@ -251,7 +250,7 @@ impl ManhwaWindow {
         let is_repeating = Rc::new(RefCell::new(false));
 
         let held_dir_press = held_dir.clone();
-        let is_repeating_press = is_repeating.clone();
+        let is_repeating_press = is_repeating;
         let reader_press = reader_key.clone();
 
         key_controller.connect_key_pressed(move |_, keyval, _code, state| {
@@ -414,7 +413,7 @@ impl ManhwaWindow {
             }
         });
 
-        let held_dir_release = held_dir.clone();
+        let held_dir_release = held_dir;
         key_controller.connect_key_released(move |_, keyval, _code, _state| {
             if keyval == gdk4::Key::j
                 || keyval == gdk4::Key::J

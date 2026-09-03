@@ -351,7 +351,6 @@ impl ReaderView {
 
         let target_y = self.target_y.clone();
         let is_animating = self.is_animating.clone();
-        let vadj = vadj.clone();
 
         let global_to_key = self.global_to_key.clone();
         let page_widgets = self.page_widgets.clone();
@@ -425,7 +424,6 @@ impl ReaderView {
 
         let target_x = self.target_x.clone();
         let is_animating = self.is_animating.clone();
-        let hadj = hadj.clone();
 
         let global_to_key = self.global_to_key.clone();
         let page_widgets = self.page_widgets.clone();
@@ -1269,7 +1267,7 @@ impl ReaderView {
         // Continuously process completed background image decodes at 60FPS on GTK main loop
         let page_widgets_rx = page_widgets.clone();
         let global_to_key_rx = global_to_key.clone();
-        let memory_manager_rx = memory_manager.clone();
+        let memory_manager_rx = memory_manager;
         let in_flight_rx = in_flight.clone();
         let vadj_rx = vadjustment.clone();
         let generation_id_rx = self.generation_id.clone();
@@ -1513,12 +1511,10 @@ impl ReaderView {
                 break;
             }
 
-            let is_loaded = {
-                let map = page_widgets.borrow();
-                map.get(&key)
-                    .map(|w| *w.is_loaded.borrow())
-                    .unwrap_or(false)
-            };
+            let is_loaded = page_widgets
+                .borrow()
+                .get(&key)
+                .is_some_and(|w| *w.is_loaded.borrow());
 
             let is_in_flight = in_flight.borrow().contains(&key);
 
