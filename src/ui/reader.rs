@@ -1235,11 +1235,7 @@ impl ReaderView {
                 if let Some(ref series) = *self.series.borrow() {
                     let prev_idx = first_idx - 1;
                     let prev_path = &series.dir_files[prev_idx];
-                    if let Ok(archive) = CbzArchive::open(prev_path) {
-                        if let Ok(prepended_h) = self.prepend_chapter(archive, prev_idx) {
-                            self.smooth_scroll_to(prepended_h);
-                        }
-                    }
+                    let _ = self.load_initial_file(prev_path.clone());
                 }
             } else {
                 self.smooth_scroll_to(0.0);
@@ -1255,7 +1251,6 @@ impl ReaderView {
         let memory_manager = self.memory_manager.clone();
 
         let series_clone = self.series.clone();
-        let first_loaded_idx = self.first_loaded_series_idx.clone();
         let last_loaded_idx = self.last_loaded_series_idx.clone();
         let last_vadj_value = self.last_vadj_value.clone();
         let in_flight = self.in_flight.clone();
@@ -1364,27 +1359,7 @@ impl ReaderView {
             let value = adj.value();
             let page_size = adj.page_size();
             let upper = adj.upper();
-
-            let last_val = *last_vadj_value.borrow();
-            let is_scrolling_up = value < last_val - 1.0;
             *last_vadj_value.borrow_mut() = value;
-
-            // Check if near top and actively scrolling UP to auto load previous .cbz file!
-            let first_idx = *first_loaded_idx.borrow();
-            if value <= 600.0 && is_scrolling_up && first_idx > 0 {
-                if let Some(ref series) = *series_clone.borrow() {
-                    let prev_idx = first_idx - 1;
-                    if let Ok(archive) = CbzArchive::open(&series.dir_files[prev_idx]) {
-                        if let Ok(prepended_h) = reader_c2.prepend_chapter(archive, prev_idx) {
-                            let adj_c = adj.clone();
-                            glib::idle_add_local(move || {
-                                adj_c.set_value(value + prepended_h);
-                                glib::ControlFlow::Break
-                            });
-                        }
-                    }
-                }
-            }
 
             // Check if near bottom to auto load next .cbz file (downward scrolling)!
             let last_idx = *last_loaded_idx.borrow();
