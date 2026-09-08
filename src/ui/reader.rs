@@ -67,6 +67,7 @@ pub struct ReaderView {
     pub generation_id: Rc<RefCell<usize>>,
     pub storage_profile: Rc<RefCell<String>>,
     pub focused_page_idx: Rc<RefCell<usize>>,
+    pub requested_initial_page: Rc<Cell<usize>>,
 
     // Channels
     pub tx: Sender<(PageKey, usize, Option<DecodedImagePayload>)>,
@@ -135,6 +136,7 @@ impl ReaderView {
         let generation_id = Rc::new(RefCell::new(0));
         let storage_profile = Rc::new(RefCell::new("fast".to_string()));
         let focused_page_idx = Rc::new(RefCell::new(0));
+        let requested_initial_page = Rc::new(Cell::new(0));
 
         let (tx, rx) = unbounded::<(PageKey, usize, Option<DecodedImagePayload>)>();
 
@@ -161,6 +163,7 @@ impl ReaderView {
             generation_id,
             storage_profile,
             focused_page_idx,
+            requested_initial_page,
             tx,
             rx,
         };
@@ -224,19 +227,11 @@ impl ReaderView {
         // Load current chapter chosen by user (e.g. Chapter 70)
         self.append_chapter(archive, initial_idx)?;
 
-        // Reset scroll position to top (Page 1) — immediate + idle safety net
+        // Reset scroll position to top (Page 1)
         let vadj = self.scrolled_window.vadjustment();
         let last_vadj = self.last_vadj_value.clone();
         vadj.set_value(0.0);
         *last_vadj.borrow_mut() = 0.0;
-
-        let vadj2 = self.scrolled_window.vadjustment();
-        let last_vadj2 = self.last_vadj_value.clone();
-        glib::idle_add_local(move || {
-            vadj2.set_value(0.0);
-            *last_vadj2.borrow_mut() = 0.0;
-            glib::ControlFlow::Break
-        });
 
         // Force initial lazy load pass starting from Page 1 (global_idx 0)
         self.request_pages_around(0);
@@ -556,6 +551,7 @@ impl ReaderView {
             return;
         }
 
+        self.requested_initial_page.set(page);
         let clamped = page.min(initial_page_count);
         let idx = (clamped - 1).min(initial_page_count.saturating_sub(1));
 
@@ -576,8 +572,8 @@ impl ReaderView {
         }
 
         let reader = self.clone();
-        let attempts = Rc::new(Cell::new(0u8));
-        glib::idle_add_local(move || {
+        let attempts = Rc::new(Cell::new(0u16));
+        glib::timeout_add_local(std::time::Duration::from_millis(16), move || {
             if reader.try_jump_to_idx(idx) || attempts.get() >= 120 {
                 glib::ControlFlow::Break
             } else {
@@ -602,8 +598,21 @@ impl ReaderView {
         match *self.reading_mode.borrow() {
             ReadingMode::ContinuousVertical => {
                 if let Some(rect) = pw.container.compute_bounds(&self.clamp) {
+                    let y = rect.y() as f64;
+                    let h = rect.height() as f64;
+                    if idx > 0 && (y <= 0.0 || h <= 0.0) {
+                        return false;
+                    }
+
                     let vadj = self.scrolled_window.vadjustment();
-                    vadj.set_value(rect.y() as f64);
+                    let max_scroll = (vadj.upper() - vadj.page_size()).max(0.0);
+                    if idx > 0 && max_scroll <= 0.0 {
+                        return false;
+                    }
+
+                    let target = y.min(max_scroll);
+                    vadj.set_value(target);
+                    *self.last_vadj_value.borrow_mut() = target;
                     self.request_pages_around(idx);
                     true
                 } else {
@@ -612,11 +621,21 @@ impl ReaderView {
             }
             ReadingMode::ContinuousHorizontal => {
                 if let Some(rect) = pw.container.compute_bounds(&self.clamp) {
-                    *self.focused_page_idx.borrow_mut() = idx;
+                    let w = rect.width() as f64;
+                    if idx > 0 && w <= 0.0 {
+                        return false;
+                    }
+
                     let hadj = self.scrolled_window.hadjustment();
+                    let max_scroll = (hadj.upper() - hadj.page_size()).max(0.0);
+                    if idx > 0 && max_scroll <= 0.0 {
+                        return false;
+                    }
+
+                    *self.focused_page_idx.borrow_mut() = idx;
                     let target_x =
-                        rect.x() as f64 + rect.width() as f64 / 2.0 - hadj.page_size() / 2.0;
-                    hadj.set_value(target_x.max(0.0));
+                        (rect.x() as f64 + w / 2.0 - hadj.page_size() / 2.0).clamp(0.0, max_scroll);
+                    hadj.set_value(target_x);
                     self.update_focus_styles(idx);
                     self.request_pages_around(idx);
                     true
@@ -697,13 +716,19 @@ impl ReaderView {
         }
 
         let mut entries: Vec<ChapterProgressEntry> = Vec::new();
-        for chap in chapters.iter() {
+        for (i, chap) in chapters.iter().enumerate() {
             let Some(reached) = self.chapter_last_page_reached(chap.chapter_id) else {
                 // Chapter auto-appended but never scrolled into view: no progress.
                 continue;
             };
-            let (last_page, completed) =
+            let (mut last_page, completed) =
                 Self::progress_from_reached(reached, chap.archive.page_count());
+            if i == 0 && !completed {
+                let init = self.requested_initial_page.get() as i64;
+                if init > 1 {
+                    last_page = last_page.max(init);
+                }
+            }
             entries.push(ChapterProgressEntry {
                 file: chap.archive.path.to_string_lossy().to_string(),
                 last_page,
@@ -1581,6 +1606,7 @@ impl ReaderView {
         *self.target_y.borrow_mut() = None;
         *self.target_x.borrow_mut() = None;
         *self.focused_page_idx.borrow_mut() = 0;
+        self.requested_initial_page.set(0);
         *self.is_animating.borrow_mut() = false;
 
         self.content_box.set_visible(false);
