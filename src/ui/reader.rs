@@ -552,6 +552,10 @@ impl ReaderView {
         }
 
         self.requested_initial_page.set(page);
+        *self.target_y.borrow_mut() = None;
+        *self.target_x.borrow_mut() = None;
+        *self.is_animating.borrow_mut() = false;
+
         let clamped = page.min(initial_page_count);
         let idx = (clamped - 1).min(initial_page_count.saturating_sub(1));
 
@@ -610,6 +614,10 @@ impl ReaderView {
                         return false;
                     }
 
+                    *self.target_y.borrow_mut() = None;
+                    *self.target_x.borrow_mut() = None;
+                    *self.is_animating.borrow_mut() = false;
+
                     let target = y.min(max_scroll);
                     vadj.set_value(target);
                     *self.last_vadj_value.borrow_mut() = target;
@@ -631,6 +639,10 @@ impl ReaderView {
                     if idx > 0 && max_scroll <= 0.0 {
                         return false;
                     }
+
+                    *self.target_y.borrow_mut() = None;
+                    *self.target_x.borrow_mut() = None;
+                    *self.is_animating.borrow_mut() = false;
 
                     *self.focused_page_idx.borrow_mut() = idx;
                     let target_x =
@@ -970,11 +982,13 @@ impl ReaderView {
             }
         }
 
-        let self_clone = self.clone();
-        glib::idle_add_local(move || {
-            self_clone.smooth_scroll_to_page(curr_page_idx);
-            glib::ControlFlow::Break
-        });
+        if !self.chapters.borrow().is_empty() {
+            let self_clone = self.clone();
+            glib::idle_add_local(move || {
+                self_clone.smooth_scroll_to_page(curr_page_idx);
+                glib::ControlFlow::Break
+            });
+        }
     }
 
     pub fn smooth_scroll_to_page(&self, global_idx: usize) {
