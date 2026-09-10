@@ -143,7 +143,12 @@ impl ManhwaWindow {
 
                     match mode {
                         crate::ui::page_widget::ReadingMode::ContinuousVertical => {
-                            let target_w = ((screen_w as f64) * 0.52).clamp(480.0, 950.0) as i32;
+                            let native_w = reader.get_active_native_width();
+                            let target_w = if native_w > 0 {
+                                (native_w as f64).min(screen_w as f64 * 0.95) as i32
+                            } else {
+                                ((screen_w as f64) * 0.52).clamp(480.0, 950.0) as i32
+                            };
                             window.set_default_size(target_w, target_h);
                         }
                         crate::ui::page_widget::ReadingMode::ContinuousHorizontal => {

@@ -101,10 +101,10 @@ impl ReaderView {
         content_box.set_margin_end(0);
         content_box.set_visible(false);
 
-        // Clamp content width to max 60% / 900px
+        // Clamp content width for vertical reading mode (updated dynamically to native image width)
         let clamp = Clamp::builder()
-            .maximum_size(900)
-            .tightening_threshold(700)
+            .maximum_size(850)
+            .tightening_threshold(850)
             .child(&content_box)
             .build();
 
@@ -178,6 +178,7 @@ impl ReaderView {
             .hadjustment()
             .connect_page_size_notify(move |_| {
                 reader_refit_h.refit_manga_layout();
+                reader_refit_h.refit_webtoon_layout();
                 reader_refit_h.center_focused_page();
             });
 
@@ -226,6 +227,7 @@ impl ReaderView {
 
         // Load current chapter chosen by user (e.g. Chapter 70)
         self.append_chapter(archive, initial_idx)?;
+        self.update_clamp_for_native_width();
 
         // Reset scroll position to top (Page 1)
         let vadj = self.scrolled_window.vadjustment();
@@ -276,6 +278,8 @@ impl ReaderView {
 
         if mode == ReadingMode::ContinuousHorizontal {
             self.refit_manga_layout();
+        } else {
+            self.update_clamp_for_native_width();
         }
 
         Ok(())
@@ -326,6 +330,8 @@ impl ReaderView {
 
         if mode == ReadingMode::ContinuousHorizontal {
             self.refit_manga_layout();
+        } else {
+            self.update_clamp_for_native_width();
         }
 
         Ok(prepended_h)
@@ -849,6 +855,47 @@ impl ReaderView {
         }
     }
 
+    pub fn get_active_native_width(&self) -> i32 {
+        let mut candidate = None;
+        let global_to_key = self.global_to_key.borrow();
+        if !global_to_key.is_empty() {
+            let cur_idx = self.get_current_global_page_idx();
+            if let Some(key) = global_to_key.get(cur_idx).or_else(|| global_to_key.first()) {
+                let page_widgets = self.page_widgets.borrow();
+                if let Some(pw) = page_widgets.get(key) {
+                    let (w, h) = pw.get_dimensions();
+                    if w > 0 {
+                        if h >= w {
+                            return w as i32;
+                        }
+                        candidate = Some(w as i32);
+                    }
+                }
+            }
+        }
+        let chapters = self.chapters.borrow();
+        if let Some(c) = chapters.first() {
+            let (w, h) = c.archive.default_dimensions;
+            if w > 0 {
+                if h >= w {
+                    return w as i32;
+                }
+                if candidate.is_none() {
+                    candidate = Some(w as i32);
+                }
+            }
+        }
+        candidate.unwrap_or(850)
+    }
+
+    pub fn update_clamp_for_native_width(&self) {
+        if *self.reading_mode.borrow() == ReadingMode::ContinuousVertical {
+            let native_w = self.get_active_native_width();
+            self.clamp.set_maximum_size(native_w);
+            self.clamp.set_tightening_threshold(native_w);
+        }
+    }
+
     pub fn refit_manga_layout(&self) {
         if *self.reading_mode.borrow() != ReadingMode::ContinuousHorizontal {
             return;
@@ -868,6 +915,19 @@ impl ReaderView {
         }
         let cur_idx = *self.focused_page_idx.borrow();
         self.update_focus_styles(cur_idx);
+    }
+
+    pub fn refit_webtoon_layout(&self) {
+        if *self.reading_mode.borrow() != ReadingMode::ContinuousVertical {
+            return;
+        }
+
+        let viewport_h = self.get_viewport_height();
+        let viewport_w = self.get_viewport_width();
+        let widgets = self.page_widgets.borrow();
+        for pw in widgets.values() {
+            pw.update_layout_for_mode(ReadingMode::ContinuousVertical, viewport_w, viewport_h);
+        }
     }
 
     /// Keeps the current focused page precisely centered in the viewport during window resize
@@ -945,8 +1005,9 @@ impl ReaderView {
                     .set_hscrollbar_policy(gtk4::PolicyType::Never);
                 self.scrolled_window
                     .set_vscrollbar_policy(gtk4::PolicyType::Automatic);
-                self.clamp.set_maximum_size(900);
-                self.clamp.set_tightening_threshold(700);
+                let native_w = self.get_active_native_width();
+                self.clamp.set_maximum_size(native_w);
+                self.clamp.set_tightening_threshold(native_w);
                 self.clamp.set_vexpand(false);
                 self.clamp.set_valign(Align::Fill);
                 self.scrolled_window.remove_css_class("manga-fade-overlay");
@@ -1625,6 +1686,8 @@ impl ReaderView {
 
         self.content_box.set_visible(false);
         self.status_page.set_visible(true);
+        self.clamp.set_maximum_size(850);
+        self.clamp.set_tightening_threshold(850);
     }
 }
 
@@ -1643,5 +1706,17 @@ mod tests {
         // Total page count for "completed" uses this chapter's own count.
         assert_eq!(ReaderView::progress_from_reached(14, 15), (15, true));
         assert_eq!(ReaderView::progress_from_reached(3, 4), (4, true));
+    }
+
+    #[test]
+    fn active_native_width_defaults_when_empty() {
+        if !gtk4::is_initialized_main_thread() && (gtk4::is_initialized() || gtk4::init().is_err())
+        {
+            return;
+        }
+        let reader = ReaderView::new();
+        assert_eq!(reader.get_active_native_width(), 850);
+        assert_eq!(reader.clamp.maximum_size(), 850);
+        assert_eq!(reader.clamp.tightening_threshold(), 850);
     }
 }

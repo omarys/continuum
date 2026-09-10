@@ -35,12 +35,14 @@ pub fn create_chapter_banner(chapter_title: &str, page_count: usize) -> GtkBox {
     let title_label = Label::builder()
         .label(clean_title)
         .halign(Align::Start)
+        .ellipsize(gtk4::pango::EllipsizeMode::End)
         .css_classes(vec!["title-3".to_string(), "bold".to_string()])
         .build();
 
     let subtitle_label = Label::builder()
         .label(format!("Chapter End / Start  •  {} pages", page_count))
         .halign(Align::Start)
+        .ellipsize(gtk4::pango::EllipsizeMode::End)
         .css_classes(vec!["dim-label".to_string(), "caption".to_string()])
         .build();
 

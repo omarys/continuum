@@ -223,9 +223,70 @@ mod tests {
         assert_eq!(parse_cli_args(&raw2).page, None);
     }
 
+    fn init_gtk_for_test() -> bool {
+        if gtk4::is_initialized_main_thread() {
+            true
+        } else if gtk4::is_initialized() {
+            false
+        } else {
+            gtk4::init().is_ok()
+        }
+    }
+
+    #[test]
+    fn test_webtoon_page_loading() {
+        if !init_gtk_for_test() {
+            return;
+        }
+        let file = std::path::PathBuf::from(
+            "/home/omary/Documents/Dewey/Manhwa/Comedy/Her Summon/Her Summon - Chapter 1 - Her Summon.cbz",
+        );
+        if !file.exists() {
+            return;
+        }
+        let app = libadwaita::Application::builder()
+            .application_id("dev.continuum.webtoon_test")
+            .build();
+        let manhwa_window = ManhwaWindow::new(&app);
+        manhwa_window.window.present();
+        manhwa_window.reader.load_initial_file(file).unwrap();
+
+        let ctx = glib::MainContext::default();
+        for _ in 0..100 {
+            ctx.iteration(false);
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+
+        let reader = &manhwa_window.reader;
+        let g2k = reader.global_to_key.borrow();
+        let widgets = reader.page_widgets.borrow();
+        assert_eq!(g2k.len(), 74);
+
+        let key = g2k.first().unwrap();
+        let pw = widgets.get(key).unwrap();
+        assert!(*pw.is_loaded.borrow());
+        assert!(pw.picture.is_visible());
+        assert!(!pw.placeholder.is_visible());
+
+        // Check bounds at initial loaded size (native resolution 720)
+        let bounds_c = pw.container.compute_bounds(&reader.clamp).unwrap();
+        assert_eq!(bounds_c.width(), 720.0);
+        assert_eq!(bounds_c.height(), 500.0);
+
+        // Now test resizing the window smaller to 500px width
+        manhwa_window.window.set_default_size(500, 800);
+        reader.refit_webtoon_layout();
+        for _ in 0..20 {
+            ctx.iteration(false);
+        }
+
+        let bounds_500 = pw.container.compute_bounds(&reader.clamp).unwrap();
+        assert!(bounds_500.height() > 0.0);
+    }
+
     #[test]
     fn test_load_custom_styles() {
-        if gtk4::init().is_err() {
+        if !init_gtk_for_test() {
             return;
         }
         load_custom_styles();
@@ -233,7 +294,7 @@ mod tests {
 
     #[test]
     fn test_manga_page_centering() {
-        if gtk4::init().is_err() {
+        if !init_gtk_for_test() {
             return;
         }
         let file = std::path::PathBuf::from(

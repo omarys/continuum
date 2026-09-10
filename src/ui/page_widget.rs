@@ -80,11 +80,12 @@ impl PageWidget {
         placeholder.append(&page_label);
 
         let picture = Picture::builder()
-            .can_shrink(false)
-            .content_fit(ContentFit::Contain)
+            .can_shrink(true)
+            .content_fit(ContentFit::ScaleDown)
             .hexpand(true)
             .vexpand(false)
             .valign(Align::Fill)
+            .halign(Align::Center)
             .build();
         picture.set_visible(false);
 
@@ -138,6 +139,18 @@ impl PageWidget {
         }
     }
 
+    /// Calculates the vertical display height for this page in webtoon mode.
+    /// Scaled down if viewport width is smaller than native width, but never scaled up beyond native width.
+    pub fn calc_webtoon_height(&self) -> i32 {
+        let (w, h) = self.get_dimensions();
+        let aspect = if w > 0 { h as f64 / w as f64 } else { 1.5 };
+        let v_w = self.last_viewport_w.get();
+        let v_w = if v_w > 50.0 { v_w } else { 850.0 };
+        // Max image width is determined by native image width (w)
+        let display_w = if w > 0 { (v_w).min(w as f64) } else { v_w };
+        ((display_w * aspect).round() as i32).max(50)
+    }
+
     pub fn update_layout_for_mode(&self, mode: ReadingMode, viewport_w: f64, viewport_h: f64) {
         if viewport_w > 0.0 {
             self.last_viewport_w.set(viewport_w);
@@ -151,18 +164,18 @@ impl PageWidget {
                 self.container.set_vexpand(false);
                 self.container.set_hexpand(true);
                 self.container.set_valign(Align::Fill);
-                self.picture.set_vexpand(false);
+                self.picture.set_vexpand(true);
                 self.picture.set_valign(Align::Fill);
-                self.picture.set_can_shrink(false);
-                self.picture.set_content_fit(ContentFit::Contain);
+                self.picture.set_halign(Align::Center);
+                self.picture.set_can_shrink(true);
+                self.picture.set_content_fit(ContentFit::ScaleDown);
                 self.picture.set_hexpand(true);
                 self.container.set_width_request(-1);
-                if !*self.is_loaded.borrow() {
-                    self.container.set_height_request(self.expected_height);
-                    self.placeholder.set_height_request(self.expected_height);
-                } else {
-                    self.container.set_height_request(-1);
-                }
+
+                let calc_height = self.calc_webtoon_height();
+                self.container.set_height_request(calc_height);
+                self.placeholder.set_height_request(calc_height);
+                self.picture.set_height_request(calc_height);
             }
             ReadingMode::ContinuousHorizontal => {
                 self.container.add_css_class("manga-page");
@@ -200,17 +213,20 @@ impl PageWidget {
 
         let is_manga = self.container.has_css_class("manga-page");
         if !is_manga {
-            self.container.set_height_request(-1);
+            let calc_height = self.calc_webtoon_height();
+            self.container.set_height_request(calc_height);
             self.container.set_width_request(-1);
             self.container.set_vexpand(false);
             self.container.set_hexpand(true);
             self.container.set_valign(Align::Fill);
 
-            self.picture.set_content_fit(ContentFit::Contain);
-            self.picture.set_can_shrink(false);
+            self.picture.set_content_fit(ContentFit::ScaleDown);
+            self.picture.set_can_shrink(true);
             self.picture.set_hexpand(true);
-            self.picture.set_vexpand(false);
+            self.picture.set_vexpand(true);
             self.picture.set_valign(Align::Fill);
+            self.picture.set_halign(Align::Center);
+            self.picture.set_height_request(calc_height);
         } else {
             let calc_width = self.calc_manga_width();
             *self.manga_width.borrow_mut() = calc_width;
@@ -243,8 +259,10 @@ impl PageWidget {
 
         let is_manga = self.container.has_css_class("manga-page");
         if !is_manga {
-            self.container.set_height_request(self.expected_height);
-            self.placeholder.set_height_request(self.expected_height);
+            let calc_height = self.calc_webtoon_height();
+            self.container.set_height_request(calc_height);
+            self.placeholder.set_height_request(calc_height);
+            self.picture.set_height_request(calc_height);
         } else {
             let manga_w = *self.manga_width.borrow();
             self.container.set_height_request(-1);
@@ -300,9 +318,19 @@ mod tests {
         assert_eq!(ReadingMode::ContinuousHorizontal.as_str(), "manga");
     }
 
+    fn init_gtk_for_test() -> bool {
+        if gtk4::is_initialized_main_thread() {
+            true
+        } else if gtk4::is_initialized() {
+            false
+        } else {
+            gtk4::init().is_ok()
+        }
+    }
+
     #[test]
     fn test_page_widget_aspect_ratio_calculation() {
-        if gtk4::init().is_err() {
+        if !init_gtk_for_test() {
             return;
         }
 
