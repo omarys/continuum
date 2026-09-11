@@ -44,6 +44,7 @@ pub struct CbzArchive {
     pub image_entries: Vec<String>,
     pub data: std::sync::Arc<Vec<u8>>,
     pub default_dimensions: (u32, u32),
+    pub page_dimensions: Vec<(u32, u32)>,
 }
 
 impl CbzArchive {
@@ -96,26 +97,48 @@ impl CbzArchive {
             .map(|s| s.to_string_lossy().to_string())
             .unwrap_or_else(|| "Unknown.cbz".to_string());
 
-        let default_dimensions = {
-            let mut found_dim = None;
-            for entry in image_entries.iter().take(4) {
-                if let Ok(entry_bytes) = Self::extract_entry_bytes(&data, entry) {
-                    if let Ok(reader) =
-                        image::ImageReader::new(Cursor::new(&entry_bytes)).with_guessed_format()
-                    {
-                        if let Ok((w, h)) = reader.into_dimensions() {
-                            if h >= w {
-                                found_dim = Some((w, h));
-                                break;
-                            } else if found_dim.is_none() {
-                                found_dim = Some((w, h));
-                            }
-                        }
+        let mut page_dimensions = Vec::with_capacity(image_entries.len());
+        let mut default_dimensions = (800, 1200);
+        let mut found_portrait = false;
+
+        for entry_name in &image_entries {
+            let dim = if let Ok(mut entry) = zip.by_name(entry_name) {
+                let mut buf = Vec::with_capacity(65536);
+                let mut limited = std::io::Read::take(&mut entry, 65536);
+                let _ = std::io::Read::read_to_end(&mut limited, &mut buf);
+                if let Ok(reader) = image::ImageReader::new(Cursor::new(&buf)).with_guessed_format()
+                {
+                    if let Ok(d) = reader.into_dimensions() {
+                        Some(d)
+                    } else {
+                        // Fall back to reading the rest of the entry if 64KB wasn't enough
+                        let _ = std::io::Read::read_to_end(&mut entry, &mut buf);
+                        image::ImageReader::new(Cursor::new(&buf))
+                            .with_guessed_format()
+                            .ok()
+                            .and_then(|r| r.into_dimensions().ok())
+                    }
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+
+            if let Some((w, h)) = dim {
+                page_dimensions.push((w, h));
+                if !found_portrait && w > 0 && h > 0 {
+                    if h >= w {
+                        default_dimensions = (w, h);
+                        found_portrait = true;
+                    } else if default_dimensions == (800, 1200) {
+                        default_dimensions = (w, h);
                     }
                 }
+            } else {
+                page_dimensions.push(default_dimensions);
             }
-            found_dim.unwrap_or((800, 1200))
-        };
+        }
 
         Ok(Self {
             path: path_buf,
@@ -123,6 +146,7 @@ impl CbzArchive {
             image_entries,
             data,
             default_dimensions,
+            page_dimensions,
         })
     }
 
@@ -163,8 +187,11 @@ impl CbzArchive {
         self.image_entries.len()
     }
 
-    pub fn get_dimensions(&self, _index: usize) -> (u32, u32) {
-        self.default_dimensions
+    pub fn get_dimensions(&self, index: usize) -> (u32, u32) {
+        self.page_dimensions
+            .get(index)
+            .copied()
+            .unwrap_or(self.default_dimensions)
     }
 
     pub fn decode_page_bytes(bytes: &[u8]) -> Result<(u32, u32, Vec<u8>), String> {
@@ -351,6 +378,9 @@ mod tests {
             let archive = CbzArchive::open(&sample).expect("Should open sample comic");
             assert!(archive.page_count() > 0);
             assert_eq!(archive.filename, "Solo_Leveling_Ch01.cbz");
+            assert_eq!(archive.page_dimensions.len(), archive.page_count());
+            let (w, h) = archive.get_dimensions(0);
+            assert!(w > 0 && h > 0);
         }
     }
 
