@@ -13,7 +13,7 @@ use crossbeam_channel::{unbounded, Receiver, Sender};
 use crate::cache::{MemoryManager, PageKey};
 use crate::cbz::{CbzArchive, DecodedImagePayload, DirectorySeries};
 use crate::ui::chapter_banner::create_chapter_banner;
-use crate::ui::page_widget::{PageWidget, ReadingMode};
+use crate::ui::page_widget::{PageWidget, ReadingMode, WEBTOON_COLUMN_RATIO};
 
 pub struct ChapterState {
     pub chapter_id: usize,
@@ -187,6 +187,7 @@ impl ReaderView {
             .scrolled_window
             .vadjustment()
             .connect_page_size_notify(move |_| {
+                reader_refit_v.refit_webtoon_layout();
                 reader_refit_v.refit_manga_layout();
                 reader_refit_v.center_focused_page();
             });
@@ -833,11 +834,21 @@ impl ReaderView {
         candidate.unwrap_or(850)
     }
 
+    /// Width of the 20:9 phone-like column for webtoon mode: the full viewport
+    /// height cropped to a phone aspect ratio, so wide screens (even fullscreen)
+    /// keep a phone-sized reading column instead of stretching the feed.
+    pub fn webtoon_column_width(&self) -> i32 {
+        (self.get_viewport_height() * WEBTOON_COLUMN_RATIO).round() as i32
+    }
+
     pub fn update_clamp_for_native_width(&self) {
         if *self.reading_mode.borrow() == ReadingMode::ContinuousVertical {
-            let native_w = self.get_active_native_width();
-            self.clamp.set_maximum_size(native_w);
-            self.clamp.set_tightening_threshold(native_w);
+            let max_w = self
+                .get_active_native_width()
+                .min(self.webtoon_column_width())
+                .max(50);
+            self.clamp.set_maximum_size(max_w);
+            self.clamp.set_tightening_threshold(max_w);
         }
     }
 
@@ -869,10 +880,13 @@ impl ReaderView {
 
         let viewport_h = self.get_viewport_height();
         let viewport_w = self.get_viewport_width();
-        let widgets = self.page_widgets.borrow();
-        for pw in widgets.values() {
-            pw.update_layout_for_mode(ReadingMode::ContinuousVertical, viewport_w, viewport_h);
+        {
+            let widgets = self.page_widgets.borrow();
+            for pw in widgets.values() {
+                pw.update_layout_for_mode(ReadingMode::ContinuousVertical, viewport_w, viewport_h);
+            }
         }
+        self.update_clamp_for_native_width();
     }
 
     /// Keeps the current focused page precisely centered in the viewport during window resize
@@ -950,9 +964,7 @@ impl ReaderView {
                     .set_hscrollbar_policy(gtk4::PolicyType::Never);
                 self.scrolled_window
                     .set_vscrollbar_policy(gtk4::PolicyType::Automatic);
-                let native_w = self.get_active_native_width();
-                self.clamp.set_maximum_size(native_w);
-                self.clamp.set_tightening_threshold(native_w);
+                self.update_clamp_for_native_width();
                 self.clamp.set_vexpand(false);
                 self.clamp.set_valign(Align::Fill);
                 self.scrolled_window.remove_css_class("manga-fade-overlay");

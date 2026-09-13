@@ -268,10 +268,21 @@ mod tests {
         assert!(pw.picture.is_visible());
         assert!(!pw.placeholder.is_visible());
 
-        // Check bounds at initial loaded size (native resolution 720)
+        // Column is capped to the 20:9 phone-like width (viewport height * 9/20),
+        // never beyond native width nor the viewport itself.
         let bounds_c = pw.container.compute_bounds(&reader.clamp).unwrap();
-        assert_eq!(bounds_c.width(), 720.0);
-        assert_eq!(bounds_c.height(), 500.0);
+        let expected_w = reader
+            .get_active_native_width()
+            .min(reader.webtoon_column_width())
+            .min(reader.get_viewport_width() as i32) as f32;
+        assert!(
+            (bounds_c.width() - expected_w).abs() <= 1.0,
+            "width {} should match capped column {}",
+            bounds_c.width(),
+            expected_w
+        );
+        // 720x500 fixture keeps its aspect at whatever width the column lands on.
+        assert!((bounds_c.height() - expected_w * 500.0 / 720.0).abs() <= 1.5);
 
         // Now test resizing the window smaller to 500px width
         manhwa_window.window.set_default_size(500, 800);

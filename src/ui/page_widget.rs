@@ -5,6 +5,10 @@ use gtk4::{Align, Box as GtkBox, ContentFit, Label, Orientation, Picture, Spinne
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
+/// Phone-like column ratio for webtoon mode: column width = viewport height * this.
+/// A 20:9 display is 20/9 tall for its width, so the column is height / (20/9).
+pub const WEBTOON_COLUMN_RATIO: f64 = 9.0 / 20.0;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReadingMode {
     ContinuousVertical,
@@ -140,14 +144,26 @@ impl PageWidget {
     }
 
     /// Calculates the vertical display height for this page in webtoon mode.
-    /// Scaled down if viewport width is smaller than native width, but never scaled up beyond native width.
+    /// Scaled down if viewport width is smaller than native width, never scaled up
+    /// beyond native width, and capped to the 20:9 phone-like column so wide
+    /// screens (even fullscreen) zoom the feed out instead of filling the width.
     pub fn calc_webtoon_height(&self) -> i32 {
         let (w, h) = self.get_dimensions();
         let aspect = if w > 0 { h as f64 / w as f64 } else { 1.5 };
         let v_w = self.last_viewport_w.get();
         let v_w = if v_w > 50.0 { v_w } else { 850.0 };
-        // Max image width is determined by native image width (w)
-        let display_w = if w > 0 { (v_w).min(w as f64) } else { v_w };
+        let v_h = self.last_viewport_h.get();
+        let phone_w = if v_h > 50.0 {
+            v_h * WEBTOON_COLUMN_RATIO
+        } else {
+            v_w
+        };
+        // Max image width is determined by native image width (w), then the column
+        let display_w = if w > 0 {
+            v_w.min(w as f64).min(phone_w)
+        } else {
+            v_w.min(phone_w)
+        };
         ((display_w * aspect).round() as i32).max(50)
     }
 
@@ -360,5 +376,35 @@ mod tests {
         // Resizing window wider to width 1100: spread scales up cleanly to 1100
         spread_pw.update_layout_for_mode(ReadingMode::ContinuousHorizontal, 1100.0, 900.0);
         assert_eq!(*spread_pw.manga_width.borrow(), 1100);
+    }
+
+    #[test]
+    fn webtoon_height_caps_at_phone_column() {
+        if !init_gtk_for_test() {
+            return;
+        }
+
+        let key = PageKey {
+            chapter_idx: 0,
+            page_idx: 0,
+        };
+        // 1200x1800 strip (aspect 1.5) on a fullscreen 1920x1080 viewport.
+        let pw = PageWidget::new(key, 0, 10, 1200, 1800);
+        pw.update_layout_for_mode(ReadingMode::ContinuousVertical, 1920.0, 1080.0);
+        // Column = 1080 * 9/20 = 486, narrower than native 1200.
+        assert_eq!(pw.calc_webtoon_height(), 729);
+
+        // Native width smaller than the column wins (never upscale).
+        let narrow_key = PageKey {
+            chapter_idx: 0,
+            page_idx: 1,
+        };
+        let narrow_pw = PageWidget::new(narrow_key, 1, 10, 400, 800);
+        narrow_pw.update_layout_for_mode(ReadingMode::ContinuousVertical, 1920.0, 1080.0);
+        assert_eq!(narrow_pw.calc_webtoon_height(), 800);
+
+        // Viewport narrower than the column wins too.
+        pw.update_layout_for_mode(ReadingMode::ContinuousVertical, 300.0, 1080.0);
+        assert_eq!(pw.calc_webtoon_height(), 450);
     }
 }
