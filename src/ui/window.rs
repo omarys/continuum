@@ -66,6 +66,12 @@ impl ManhwaWindow {
             .css_classes(vec!["flat".to_string()])
             .build();
 
+        let zoom_btn = gtk4::Button::builder()
+            .icon_name("zoom-in-symbolic")
+            .tooltip_text("Cycle Zoom: 1x, 1.25x, 1.5x, 2x (z)")
+            .css_classes(vec!["flat".to_string()])
+            .build();
+
         let help_btn = gtk4::Button::builder()
             .icon_name("help-browser-symbolic")
             .tooltip_text("Keyboard Shortcuts (?)")
@@ -75,6 +81,7 @@ impl ManhwaWindow {
         header_bar.pack_start(&app_icon);
         header_bar.pack_start(&open_btn);
         header_bar.pack_start(&mode_btn);
+        header_bar.pack_start(&zoom_btn);
         header_bar.pack_end(&help_btn);
         toolbar_view.add_top_bar(&header_bar);
 
@@ -88,6 +95,25 @@ impl ManhwaWindow {
             reader_mode.toggle_reading_mode();
             let mode = *reader_mode.reading_mode.borrow();
             ManhwaWindow::update_window_size_with_window(&mode_btn_window, &reader_mode, mode);
+        });
+
+        let reader_zoom = reader.clone();
+        let zoom_btn_c = zoom_btn.clone();
+        zoom_btn.connect_clicked(move |_| {
+            reader_zoom.cycle_zoom();
+            let z = reader_zoom.zoom();
+            let label = if (z - 1.0).abs() < 1e-3 {
+                "1x"
+            } else if (z - 1.25).abs() < 1e-3 {
+                "1.25x"
+            } else if (z - 1.5).abs() < 1e-3 {
+                "1.5x"
+            } else if (z - 2.0).abs() < 1e-3 {
+                "2x"
+            } else {
+                "Zoom"
+            };
+            zoom_btn_c.set_tooltip_text(Some(&format!("Zoom: {} (z)", label)));
         });
 
         let win_help = window.clone();
@@ -269,6 +295,25 @@ impl ManhwaWindow {
                 reader_key.toggle_reading_mode();
                 let mode = *reader_key.reading_mode.borrow();
                 ManhwaWindow::update_window_size_with_window(&win_key, &reader_key, mode);
+                return glib::Propagation::Stop;
+            }
+
+            // Cycle Zoom (z / Z, Ctrl++, Ctrl+-, Ctrl+0)
+            if !has_ctrl && (keyval == gdk4::Key::z || keyval == gdk4::Key::Z) {
+                if has_shift || keyval == gdk4::Key::Z {
+                    reader_key.cycle_zoom_reverse();
+                } else {
+                    reader_key.cycle_zoom();
+                }
+                return glib::Propagation::Stop;
+            } else if has_ctrl && (keyval == gdk4::Key::plus || keyval == gdk4::Key::equal) {
+                reader_key.cycle_zoom();
+                return glib::Propagation::Stop;
+            } else if has_ctrl && (keyval == gdk4::Key::minus || keyval == gdk4::Key::underscore) {
+                reader_key.cycle_zoom_reverse();
+                return glib::Propagation::Stop;
+            } else if has_ctrl && keyval == gdk4::Key::_0 {
+                reader_key.reset_zoom();
                 return glib::Propagation::Stop;
             }
 
@@ -454,6 +499,20 @@ pub fn show_shortcuts_dialog(parent: &impl IsA<gtk4::Window>) {
               <object class="GtkShortcutsShortcut">
                 <property name="accelerator">m</property>
                 <property name="title">Toggle Reading Mode (Manhwa / Manga)</property>
+              </object>
+            </child>
+
+            <child>
+              <object class="GtkShortcutsShortcut">
+                <property name="accelerator">z</property>
+                <property name="title">Cycle Zoom (1x, 1.25x, 1.5x, 2x)</property>
+              </object>
+            </child>
+
+            <child>
+              <object class="GtkShortcutsShortcut">
+                <property name="accelerator">&lt;Shift&gt;z</property>
+                <property name="title">Cycle Zoom Reverse</property>
               </object>
             </child>
 

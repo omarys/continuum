@@ -48,6 +48,7 @@ pub struct PageWidget {
     pub manga_width: Rc<RefCell<i32>>,
     pub last_viewport_w: Cell<f64>,
     pub last_viewport_h: Cell<f64>,
+    pub zoom: Cell<f64>,
 }
 
 impl PageWidget {
@@ -111,6 +112,7 @@ impl PageWidget {
             manga_width: Rc::new(RefCell::new(600)),
             last_viewport_w: Cell::new(800.0),
             last_viewport_h: Cell::new(900.0),
+            zoom: Cell::new(1.0),
         }
     }
 
@@ -136,20 +138,32 @@ impl PageWidget {
         let v_w = if v_w > 0.0 { v_w } else { 800.0 };
 
         let height_fit_w = v_h / aspect;
-        if w > h || height_fit_w > v_w {
-            (v_w as i32).max(100)
+        let base_w = if w > h || height_fit_w > v_w {
+            v_w
         } else {
-            (height_fit_w as i32).max(100)
+            height_fit_w
+        };
+        let zoom = self.zoom.get();
+        ((base_w * zoom).round() as i32).max(100)
+    }
+
+    /// Calculates the vertical display height for this page in manga mode.
+    /// When unzoomed (1.0x), returns -1 so the page fills the viewport naturally.
+    /// When zoomed (> 1.0x), scales viewport height by zoom.
+    pub fn calc_manga_height(&self) -> i32 {
+        let v_h = self.last_viewport_h.get();
+        let v_h = if v_h > 0.0 { v_h } else { 900.0 };
+        let zoom = self.zoom.get();
+        if (zoom - 1.0).abs() > 1e-4 {
+            ((v_h * zoom).round() as i32).max(100)
+        } else {
+            -1
         }
     }
 
-    /// Calculates the vertical display height for this page in webtoon mode.
-    /// Scaled down if viewport width is smaller than native width, never scaled up
-    /// beyond native width, and capped to the 20:9 phone-like column so wide
-    /// screens (even fullscreen) zoom the feed out instead of filling the width.
-    pub fn calc_webtoon_height(&self) -> i32 {
-        let (w, h) = self.get_dimensions();
-        let aspect = if w > 0 { h as f64 / w as f64 } else { 1.5 };
+    /// Calculates the base unzoomed display width for this page in webtoon mode.
+    pub fn calc_webtoon_base_width(&self) -> f64 {
+        let (w, _h) = self.get_dimensions();
         let v_w = self.last_viewport_w.get();
         let v_w = if v_w > 50.0 { v_w } else { 850.0 };
         let v_h = self.last_viewport_h.get();
@@ -158,13 +172,29 @@ impl PageWidget {
         } else {
             v_w
         };
-        // Max image width is determined by native image width (w), then the column
-        let display_w = if w > 0 {
+        if w > 0 {
             v_w.min(w as f64).min(phone_w)
         } else {
             v_w.min(phone_w)
-        };
+        }
+    }
+
+    /// Calculates the vertical display height for this page in webtoon mode.
+    /// Scaled down if viewport width is smaller than native width, never scaled up
+    /// beyond native width at 1x, and capped to the 20:9 phone-like column so wide
+    /// screens (even fullscreen) zoom the feed out instead of filling the width.
+    /// Multiplied by current zoom level.
+    pub fn calc_webtoon_height(&self) -> i32 {
+        let (w, h) = self.get_dimensions();
+        let aspect = if w > 0 { h as f64 / w as f64 } else { 1.5 };
+        let display_w = self.calc_webtoon_base_width() * self.zoom.get();
         ((display_w * aspect).round() as i32).max(50)
+    }
+
+    /// Calculates the horizontal display width for this page in webtoon mode with zoom.
+    pub fn calc_webtoon_width(&self) -> i32 {
+        let display_w = self.calc_webtoon_base_width() * self.zoom.get();
+        (display_w.round() as i32).max(50)
     }
 
     pub fn update_layout_for_mode(&self, mode: ReadingMode, viewport_w: f64, viewport_h: f64) {
@@ -184,9 +214,24 @@ impl PageWidget {
                 self.picture.set_valign(Align::Fill);
                 self.picture.set_halign(Align::Center);
                 self.picture.set_can_shrink(true);
-                self.picture.set_content_fit(ContentFit::ScaleDown);
+                let is_zoomed = (self.zoom.get() - 1.0).abs() > 1e-4;
+                self.picture.set_content_fit(if is_zoomed {
+                    ContentFit::Contain
+                } else {
+                    ContentFit::ScaleDown
+                });
                 self.picture.set_hexpand(true);
-                self.container.set_width_request(-1);
+
+                if is_zoomed {
+                    let calc_w = self.calc_webtoon_width();
+                    self.container.set_width_request(calc_w);
+                    self.placeholder.set_width_request(calc_w);
+                    self.picture.set_width_request(calc_w);
+                } else {
+                    self.container.set_width_request(-1);
+                    self.placeholder.set_width_request(-1);
+                    self.picture.set_width_request(-1);
+                }
 
                 let calc_height = self.calc_webtoon_height();
                 self.container.set_height_request(calc_height);
@@ -198,17 +243,20 @@ impl PageWidget {
                 self.container.set_vexpand(true);
                 self.container.set_hexpand(false);
                 self.container.set_valign(Align::Fill);
-                self.container.set_height_request(-1);
+
+                let calc_height = self.calc_manga_height();
+                self.container.set_height_request(calc_height);
 
                 self.picture.set_can_shrink(true);
                 self.picture.set_content_fit(ContentFit::Contain);
                 self.picture.set_vexpand(true);
                 self.picture.set_hexpand(false);
                 self.picture.set_valign(Align::Center);
+                self.picture.set_height_request(calc_height);
 
                 self.placeholder.set_vexpand(true);
                 self.placeholder.set_valign(Align::Center);
-                self.placeholder.set_height_request(-1);
+                self.placeholder.set_height_request(calc_height);
 
                 let calc_width = self.calc_manga_width();
                 *self.manga_width.borrow_mut() = calc_width;
@@ -231,12 +279,26 @@ impl PageWidget {
         if !is_manga {
             let calc_height = self.calc_webtoon_height();
             self.container.set_height_request(calc_height);
-            self.container.set_width_request(-1);
+
+            let is_zoomed = (self.zoom.get() - 1.0).abs() > 1e-4;
+            if is_zoomed {
+                let calc_w = self.calc_webtoon_width();
+                self.container.set_width_request(calc_w);
+                self.picture.set_width_request(calc_w);
+            } else {
+                self.container.set_width_request(-1);
+                self.picture.set_width_request(-1);
+            }
+
             self.container.set_vexpand(false);
             self.container.set_hexpand(true);
             self.container.set_valign(Align::Fill);
 
-            self.picture.set_content_fit(ContentFit::ScaleDown);
+            self.picture.set_content_fit(if is_zoomed {
+                ContentFit::Contain
+            } else {
+                ContentFit::ScaleDown
+            });
             self.picture.set_can_shrink(true);
             self.picture.set_hexpand(true);
             self.picture.set_vexpand(true);
@@ -246,8 +308,9 @@ impl PageWidget {
         } else {
             let calc_width = self.calc_manga_width();
             *self.manga_width.borrow_mut() = calc_width;
+            let calc_height = self.calc_manga_height();
 
-            self.container.set_height_request(-1);
+            self.container.set_height_request(calc_height);
             self.container.set_width_request(calc_width);
             self.container.set_vexpand(true);
             self.container.set_hexpand(false);
@@ -258,6 +321,7 @@ impl PageWidget {
             self.picture.set_vexpand(true);
             self.picture.set_hexpand(false);
             self.picture.set_width_request(calc_width);
+            self.picture.set_height_request(calc_height);
             self.picture.set_valign(Align::Center);
         }
 
@@ -279,11 +343,24 @@ impl PageWidget {
             self.container.set_height_request(calc_height);
             self.placeholder.set_height_request(calc_height);
             self.picture.set_height_request(calc_height);
+
+            let is_zoomed = (self.zoom.get() - 1.0).abs() > 1e-4;
+            if is_zoomed {
+                let calc_w = self.calc_webtoon_width();
+                self.container.set_width_request(calc_w);
+                self.placeholder.set_width_request(calc_w);
+                self.picture.set_width_request(calc_w);
+            } else {
+                self.container.set_width_request(-1);
+                self.placeholder.set_width_request(-1);
+                self.picture.set_width_request(-1);
+            }
         } else {
             let manga_w = *self.manga_width.borrow();
-            self.container.set_height_request(-1);
+            let calc_height = self.calc_manga_height();
+            self.container.set_height_request(calc_height);
             self.container.set_width_request(manga_w);
-            self.placeholder.set_height_request(-1);
+            self.placeholder.set_height_request(calc_height);
             self.placeholder.set_width_request(manga_w);
         }
         self.placeholder.set_visible(true);
@@ -346,6 +423,7 @@ mod tests {
 
     #[test]
     fn test_page_widget_aspect_ratio_calculation() {
+        let _lock = crate::GTK_TEST_MUTEX.lock();
         if !init_gtk_for_test() {
             return;
         }
@@ -380,6 +458,7 @@ mod tests {
 
     #[test]
     fn webtoon_height_caps_at_phone_column() {
+        let _lock = crate::GTK_TEST_MUTEX.lock();
         if !init_gtk_for_test() {
             return;
         }
@@ -406,5 +485,51 @@ mod tests {
         // Viewport narrower than the column wins too.
         pw.update_layout_for_mode(ReadingMode::ContinuousVertical, 300.0, 1080.0);
         assert_eq!(pw.calc_webtoon_height(), 450);
+    }
+
+    #[test]
+    fn test_page_widget_zoom_scaling() {
+        let _lock = crate::GTK_TEST_MUTEX.lock();
+        if !init_gtk_for_test() {
+            return;
+        }
+
+        let key = PageKey {
+            chapter_idx: 0,
+            page_idx: 0,
+        };
+        // 1200x1800 page (aspect 1.5)
+        let pw = PageWidget::new(key, 0, 10, 1200, 1800);
+
+        // Webtoon mode on 1920x1080 viewport (phone column = 486)
+        pw.update_layout_for_mode(ReadingMode::ContinuousVertical, 1920.0, 1080.0);
+        assert_eq!(pw.calc_webtoon_width(), 486);
+        assert_eq!(pw.calc_webtoon_height(), 729);
+
+        // 1.25x zoom
+        pw.zoom.set(1.25);
+        assert_eq!(pw.calc_webtoon_width(), (486.0 * 1.25f64).round() as i32); // 608
+        assert_eq!(pw.calc_webtoon_height(), (729.0 * 1.25f64).round() as i32); // 911
+
+        // 1.5x zoom
+        pw.zoom.set(1.5);
+        assert_eq!(pw.calc_webtoon_width(), (486.0 * 1.5f64).round() as i32); // 729
+        assert_eq!(pw.calc_webtoon_height(), (729.0 * 1.5f64).round() as i32); // 1094
+
+        // 2.0x zoom
+        pw.zoom.set(2.0);
+        assert_eq!(pw.calc_webtoon_width(), 486 * 2); // 972
+        assert_eq!(pw.calc_webtoon_height(), 729 * 2); // 1458
+
+        // Manga mode on 800x900 viewport:
+        // Base width for portrait: 900 / 1.5 = 600
+        pw.zoom.set(1.0);
+        pw.update_layout_for_mode(ReadingMode::ContinuousHorizontal, 800.0, 900.0);
+        assert_eq!(pw.calc_manga_width(), 600);
+        assert_eq!(pw.calc_manga_height(), -1);
+
+        pw.zoom.set(1.5);
+        assert_eq!(pw.calc_manga_width(), 900);
+        assert_eq!(pw.calc_manga_height(), 1350);
     }
 }

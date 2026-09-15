@@ -68,6 +68,7 @@ pub struct ReaderView {
     pub storage_profile: Rc<RefCell<String>>,
     pub focused_page_idx: Rc<RefCell<usize>>,
     pub requested_initial_page: Rc<Cell<usize>>,
+    pub zoom: Rc<Cell<f64>>,
 
     // Channels
     pub tx: Sender<(PageKey, usize, Option<DecodedImagePayload>)>,
@@ -137,6 +138,7 @@ impl ReaderView {
         let storage_profile = Rc::new(RefCell::new("fast".to_string()));
         let focused_page_idx = Rc::new(RefCell::new(0));
         let requested_initial_page = Rc::new(Cell::new(0));
+        let zoom = Rc::new(Cell::new(1.0));
 
         let (tx, rx) = unbounded::<(PageKey, usize, Option<DecodedImagePayload>)>();
 
@@ -164,11 +166,13 @@ impl ReaderView {
             storage_profile,
             focused_page_idx,
             requested_initial_page,
+            zoom,
             tx,
             rx,
         };
 
         reader.setup_scroll_listener();
+        reader.setup_zoom_gesture();
 
         // Re-fit page widths and margins whenever the viewport changes
         // (window resize or adjustment changes) while in horizontal/manga mode.
@@ -254,6 +258,7 @@ impl ReaderView {
         let mode = *self.reading_mode.borrow();
         let viewport_h = self.get_viewport_height();
         let viewport_w = self.get_viewport_width();
+        let cur_zoom = self.zoom.get();
         for page_idx in 0..total_pages {
             let (w, h) = archive.get_dimensions(page_idx);
             let key = PageKey {
@@ -261,6 +266,7 @@ impl ReaderView {
                 page_idx,
             };
             let page_widget = PageWidget::new(key.clone(), page_idx, total_pages, w, h);
+            page_widget.zoom.set(cur_zoom);
             page_widget.update_layout_for_mode(mode, viewport_w, viewport_h);
             self.content_box.append(&page_widget.container);
             self.page_widgets
@@ -304,11 +310,13 @@ impl ReaderView {
         let mode = *self.reading_mode.borrow();
         let viewport_h = self.get_viewport_height();
         let viewport_w = self.get_viewport_width();
+        let cur_zoom = self.zoom.get();
         let mut prepended_h = 100.0;
         for page_idx in (0..total_pages).rev() {
             let (w, h) = archive.get_dimensions(page_idx);
             let key = &new_keys[page_idx];
             let pw = PageWidget::new(key.clone(), page_idx, total_pages, w, h);
+            pw.zoom.set(cur_zoom);
             pw.update_layout_for_mode(mode, viewport_w, viewport_h);
             prepended_h += pw.expected_height as f64;
             self.content_box.prepend(&pw.container);
@@ -843,12 +851,14 @@ impl ReaderView {
 
     pub fn update_clamp_for_native_width(&self) {
         if *self.reading_mode.borrow() == ReadingMode::ContinuousVertical {
-            let max_w = self
+            let base_w = self
                 .get_active_native_width()
                 .min(self.webtoon_column_width())
                 .max(50);
-            self.clamp.set_maximum_size(max_w);
-            self.clamp.set_tightening_threshold(max_w);
+            let zoom = self.zoom.get();
+            let target_w = (base_w as f64 * zoom).round() as i32;
+            self.clamp.set_maximum_size(target_w);
+            self.clamp.set_tightening_threshold(target_w);
         }
     }
 
@@ -857,10 +867,19 @@ impl ReaderView {
             return;
         }
 
+        let is_zoomed = (self.zoom.get() - 1.0).abs() > 1e-4;
+        self.scrolled_window.set_vscrollbar_policy(if is_zoomed {
+            gtk4::PolicyType::Automatic
+        } else {
+            gtk4::PolicyType::Never
+        });
+
         let viewport_h = self.get_viewport_height();
         let viewport_w = self.get_viewport_width();
+        let cur_zoom = self.zoom.get();
         let widgets = self.page_widgets.borrow();
         for pw in widgets.values() {
+            pw.zoom.set(cur_zoom);
             pw.update_layout_for_mode(ReadingMode::ContinuousHorizontal, viewport_w, viewport_h);
         }
 
@@ -878,11 +897,20 @@ impl ReaderView {
             return;
         }
 
+        let is_zoomed = (self.zoom.get() - 1.0).abs() > 1e-4;
+        self.scrolled_window.set_hscrollbar_policy(if is_zoomed {
+            gtk4::PolicyType::Automatic
+        } else {
+            gtk4::PolicyType::Never
+        });
+
         let viewport_h = self.get_viewport_height();
         let viewport_w = self.get_viewport_width();
+        let cur_zoom = self.zoom.get();
         {
             let widgets = self.page_widgets.borrow();
             for pw in widgets.values() {
+                pw.zoom.set(cur_zoom);
                 pw.update_layout_for_mode(ReadingMode::ContinuousVertical, viewport_w, viewport_h);
             }
         }
@@ -960,8 +988,12 @@ impl ReaderView {
                 self.content_box.set_spacing(0);
                 self.content_box.set_margin_start(0);
                 self.content_box.set_margin_end(0);
-                self.scrolled_window
-                    .set_hscrollbar_policy(gtk4::PolicyType::Never);
+                let is_zoomed = (self.zoom.get() - 1.0).abs() > 1e-4;
+                self.scrolled_window.set_hscrollbar_policy(if is_zoomed {
+                    gtk4::PolicyType::Automatic
+                } else {
+                    gtk4::PolicyType::Never
+                });
                 self.scrolled_window
                     .set_vscrollbar_policy(gtk4::PolicyType::Automatic);
                 self.update_clamp_for_native_width();
@@ -970,7 +1002,9 @@ impl ReaderView {
                 self.scrolled_window.remove_css_class("manga-fade-overlay");
 
                 let page_widgets = self.page_widgets.borrow();
+                let cur_zoom = self.zoom.get();
                 for pw in page_widgets.values() {
+                    pw.zoom.set(cur_zoom);
                     pw.container.remove_css_class("manga-page-focused");
                     pw.container.remove_css_class("manga-page-side");
                     pw.update_layout_for_mode(
@@ -985,10 +1019,14 @@ impl ReaderView {
                 self.content_box.set_vexpand(true);
                 self.content_box.set_valign(Align::Fill);
                 self.content_box.set_spacing(20);
+                let is_zoomed = (self.zoom.get() - 1.0).abs() > 1e-4;
                 self.scrolled_window
                     .set_hscrollbar_policy(gtk4::PolicyType::Automatic);
-                self.scrolled_window
-                    .set_vscrollbar_policy(gtk4::PolicyType::Never);
+                self.scrolled_window.set_vscrollbar_policy(if is_zoomed {
+                    gtk4::PolicyType::Automatic
+                } else {
+                    gtk4::PolicyType::Never
+                });
                 self.clamp.set_maximum_size(i32::MAX);
                 self.clamp.set_tightening_threshold(i32::MAX);
                 self.clamp.set_vexpand(true);
@@ -1662,6 +1700,188 @@ impl ReaderView {
         self.status_page.set_visible(true);
         self.clamp.set_maximum_size(850);
         self.clamp.set_tightening_threshold(850);
+        self.zoom.set(1.0);
+    }
+
+    #[allow(dead_code)]
+    pub fn zoom(&self) -> f64 {
+        self.zoom.get()
+    }
+
+    pub fn set_zoom(&self, target_zoom: f64) {
+        let new_zoom = target_zoom.clamp(1.0, 3.0);
+        let old_zoom = self.zoom.get();
+        if (new_zoom - old_zoom).abs() < 1e-4 {
+            return;
+        }
+
+        let mode = *self.reading_mode.borrow();
+        let vadj = self.scrolled_window.vadjustment();
+
+        // Capture current viewport anchor before applying new zoom
+        let cur_idx = self.global_page_at_viewport_center();
+        let anchor = match mode {
+            ReadingMode::ContinuousVertical => {
+                if cur_idx == 0 && vadj.value() <= 5.0 {
+                    None
+                } else {
+                    let center_y = vadj.value() + vadj.page_size() / 2.0;
+                    let g2k = self.global_to_key.borrow();
+                    let widgets = self.page_widgets.borrow();
+                    let mut info = None;
+                    if let Some(key) = g2k.get(cur_idx) {
+                        if let Some(pw) = widgets.get(key) {
+                            if let Some(rect) = pw.container.compute_bounds(&self.clamp) {
+                                let page_y = rect.y() as f64;
+                                let page_h = rect.height() as f64;
+                                if page_h > 0.0 {
+                                    let rel = ((center_y - page_y) / page_h).clamp(0.0, 1.0);
+                                    info = Some((cur_idx, rel));
+                                }
+                            }
+                        }
+                    }
+                    info
+                }
+            }
+            ReadingMode::ContinuousHorizontal => None,
+        };
+
+        self.zoom.set(new_zoom);
+
+        if self.chapters.borrow().is_empty() {
+            self.update_clamp_for_native_width();
+            return;
+        }
+
+        // Immediate proportional scroll adjustment to eliminate jumps
+        let ratio = new_zoom / old_zoom;
+        if mode == ReadingMode::ContinuousVertical {
+            if cur_idx == 0 && vadj.value() <= 5.0 {
+                vadj.set_value(0.0);
+                *self.last_vadj_value.borrow_mut() = 0.0;
+            } else {
+                let initial_y = (vadj.value() * ratio).max(0.0);
+                vadj.set_value(initial_y);
+                *self.last_vadj_value.borrow_mut() = initial_y;
+            }
+            self.refit_webtoon_layout();
+        } else {
+            self.refit_manga_layout();
+            self.center_focused_page();
+        }
+
+        // Refine anchor after GTK layout pass
+        let reader = self.clone();
+        if let Some((idx, rel_offset)) = anchor {
+            let attempts = Rc::new(Cell::new(0u16));
+            glib::timeout_add_local(Duration::from_millis(16), move || {
+                if reader.try_restore_anchor(idx, rel_offset) || attempts.get() >= 15 {
+                    glib::ControlFlow::Break
+                } else {
+                    attempts.set(attempts.get() + 1);
+                    glib::ControlFlow::Continue
+                }
+            });
+        } else if mode == ReadingMode::ContinuousHorizontal {
+            let attempts = Rc::new(Cell::new(0u16));
+            glib::timeout_add_local(Duration::from_millis(16), move || {
+                reader.center_focused_page();
+                if attempts.get() >= 5 {
+                    glib::ControlFlow::Break
+                } else {
+                    attempts.set(attempts.get() + 1);
+                    glib::ControlFlow::Continue
+                }
+            });
+        }
+    }
+
+    fn try_restore_anchor(&self, idx: usize, rel_offset: f64) -> bool {
+        let g2k = self.global_to_key.borrow();
+        let widgets = self.page_widgets.borrow();
+        if let Some(key) = g2k.get(idx) {
+            if let Some(pw) = widgets.get(key) {
+                if let Some(rect) = pw.container.compute_bounds(&self.clamp) {
+                    let page_y = rect.y() as f64;
+                    let page_h = rect.height() as f64;
+                    if page_h <= 0.0 {
+                        return false;
+                    }
+                    let vadj = self.scrolled_window.vadjustment();
+                    let target_center_y = page_y + page_h * rel_offset;
+                    let max_scroll = (vadj.upper() - vadj.page_size()).max(0.0);
+                    let target_vadj =
+                        (target_center_y - vadj.page_size() / 2.0).clamp(0.0, max_scroll);
+                    vadj.set_value(target_vadj);
+                    *self.last_vadj_value.borrow_mut() = target_vadj;
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    pub const ZOOM_PRESETS: [f64; 4] = [1.0, 1.25, 1.5, 2.0];
+
+    pub fn cycle_zoom(&self) {
+        let cur = self.zoom.get();
+        let next = if cur < 1.125 {
+            Self::ZOOM_PRESETS[1]
+        } else if cur < 1.375 {
+            Self::ZOOM_PRESETS[2]
+        } else if cur < 1.75 {
+            Self::ZOOM_PRESETS[3]
+        } else {
+            Self::ZOOM_PRESETS[0]
+        };
+        self.set_zoom(next);
+    }
+
+    pub fn cycle_zoom_reverse(&self) {
+        let cur = self.zoom.get();
+        let prev = if cur > 1.75 {
+            Self::ZOOM_PRESETS[2]
+        } else if cur > 1.375 {
+            Self::ZOOM_PRESETS[1]
+        } else if cur > 1.125 {
+            Self::ZOOM_PRESETS[0]
+        } else {
+            Self::ZOOM_PRESETS[3]
+        };
+        self.set_zoom(prev);
+    }
+
+    pub fn reset_zoom(&self) {
+        self.set_zoom(1.0);
+    }
+
+    fn setup_zoom_gesture(&self) {
+        let zoom_gesture = gtk4::GestureZoom::new();
+        let initial_zoom = Rc::new(Cell::new(1.0f64));
+
+        let init_z = initial_zoom.clone();
+        let reader_begin = self.clone();
+        zoom_gesture.connect_begin(move |_, _| {
+            init_z.set(reader_begin.zoom.get());
+        });
+
+        let init_z2 = initial_zoom;
+        let reader_scale = self.clone();
+        zoom_gesture.connect_scale_changed(move |_, scale| {
+            let target_zoom = (init_z2.get() * scale).clamp(1.0, 3.0);
+            reader_scale.set_zoom(target_zoom);
+        });
+
+        let reader_end = self.clone();
+        zoom_gesture.connect_end(move |_, _| {
+            let cur = reader_end.zoom.get();
+            if (cur - 1.0).abs() < 0.05 {
+                reader_end.set_zoom(1.0);
+            }
+        });
+
+        self.scrolled_window.add_controller(zoom_gesture);
     }
 }
 
@@ -1684,6 +1904,7 @@ mod tests {
 
     #[test]
     fn active_native_width_defaults_when_empty() {
+        let _lock = crate::GTK_TEST_MUTEX.lock();
         if !gtk4::is_initialized_main_thread() && (gtk4::is_initialized() || gtk4::init().is_err())
         {
             return;
@@ -1692,5 +1913,44 @@ mod tests {
         assert_eq!(reader.get_active_native_width(), 850);
         assert_eq!(reader.clamp.maximum_size(), 850);
         assert_eq!(reader.clamp.tightening_threshold(), 850);
+        assert_eq!(reader.zoom(), 1.0);
+
+        // Forward cycling: 1.0 -> 1.25 -> 1.5 -> 2.0 -> 1.0
+        reader.cycle_zoom();
+        assert_eq!(reader.zoom(), 1.25);
+        reader.cycle_zoom();
+        assert_eq!(reader.zoom(), 1.5);
+        reader.cycle_zoom();
+        assert_eq!(reader.zoom(), 2.0);
+        reader.cycle_zoom();
+        assert_eq!(reader.zoom(), 1.0);
+
+        // Reverse cycling: 1.0 -> 2.0 -> 1.5 -> 1.25 -> 1.0
+        reader.cycle_zoom_reverse();
+        assert_eq!(reader.zoom(), 2.0);
+        reader.cycle_zoom_reverse();
+        assert_eq!(reader.zoom(), 1.5);
+        reader.cycle_zoom_reverse();
+        assert_eq!(reader.zoom(), 1.25);
+        reader.cycle_zoom_reverse();
+        assert_eq!(reader.zoom(), 1.0);
+
+        // Zoom clamp scaling and reset
+        let base_w = reader
+            .get_active_native_width()
+            .min(reader.webtoon_column_width());
+        reader.set_zoom(1.5);
+        assert_eq!(reader.zoom(), 1.5);
+        assert_eq!(
+            reader.clamp.maximum_size(),
+            (base_w as f64 * 1.5f64).round() as i32
+        );
+        reader.set_zoom(2.0);
+        assert_eq!(reader.zoom(), 2.0);
+        assert_eq!(reader.clamp.maximum_size(), base_w * 2);
+
+        reader.reset_zoom();
+        assert_eq!(reader.zoom(), 1.0);
+        assert_eq!(reader.clamp.maximum_size(), base_w);
     }
 }

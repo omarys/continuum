@@ -175,6 +175,9 @@ fn open_window(
 }
 
 #[cfg(test)]
+pub static GTK_TEST_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+#[cfg(test)]
 #[allow(clippy::items_after_test_module)]
 mod tests {
     use super::*;
@@ -235,6 +238,7 @@ mod tests {
 
     #[test]
     fn test_webtoon_page_loading() {
+        let _lock = GTK_TEST_MUTEX.lock();
         if !init_gtk_for_test() {
             return;
         }
@@ -297,6 +301,7 @@ mod tests {
 
     #[test]
     fn test_load_custom_styles() {
+        let _lock = GTK_TEST_MUTEX.lock();
         if !init_gtk_for_test() {
             return;
         }
@@ -305,6 +310,7 @@ mod tests {
 
     #[test]
     fn test_manga_page_centering() {
+        let _lock = GTK_TEST_MUTEX.lock();
         if !init_gtk_for_test() {
             return;
         }
