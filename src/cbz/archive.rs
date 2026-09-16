@@ -235,15 +235,26 @@ impl CbzArchive {
                 rgba_bytes.len()
             ));
         }
-        let bytes = glib::Bytes::from_owned(rgba_bytes);
+        // Pad the texture with duplicated edge texels. On fractional device
+        // scales (e.g. 1.25) GTK ghosts the boundary rows between adjacent
+        // downscaled textures against the page background, showing up as a
+        // 1px line between pages in webtoon mode. The doubled edge texels make
+        // those rows sample the page's own edge color instead. GtkPicture fits
+        // the padded texture into the same rect, so visible content is only
+        // ~1-2% inset.
+        let bleed = TEXTURE_BLEED as usize;
+        let padded = bleed_rgba(width, height, &rgba_bytes, bleed);
+        let tex_w = width as usize + 2 * bleed;
+        let tex_h = height as usize + 2 * bleed;
+        let bytes = glib::Bytes::from_owned(padded);
         let pixbuf = gdk_pixbuf::Pixbuf::from_bytes(
             &bytes,
             gdk_pixbuf::Colorspace::Rgb,
             true,
             8,
-            width as i32,
-            height as i32,
-            width as i32 * 4,
+            tex_w as i32,
+            tex_h as i32,
+            (tex_w * 4) as i32,
         );
         let texture = Texture::for_pixbuf(&pixbuf);
         Ok(LoadedPageData {
@@ -255,6 +266,34 @@ impl CbzArchive {
         })
     }
 }
+
+/// Rebuild RGBA with a `bleed`-texel border of duplicated edge pixels on all
+/// four sides, so boundary sampling at fractional scales sees edge color
+/// instead of background.
+fn bleed_rgba(width: u32, height: u32, src: &[u8], bleed: usize) -> Vec<u8> {
+    let w = width as usize;
+    let h = height as usize;
+    let mut out = Vec::with_capacity((w + 2 * bleed) * (h + 2 * bleed) * 4);
+    for y in 0..(h + 2 * bleed) {
+        let sy = y.saturating_sub(bleed).min(h - 1);
+        let row = &src[sy * w * 4..(sy + 1) * w * 4];
+        let (left, right) = (&row[..4], &row[w * 4 - 4..w * 4]);
+        for _ in 0..bleed {
+            out.extend_from_slice(left);
+        }
+        out.extend_from_slice(row);
+        for _ in 0..bleed {
+            out.extend_from_slice(right);
+        }
+    }
+    out
+}
+
+/// Texture edge bleed: duplicated edge texels added on all four sides of each
+/// uploaded page so fractional-scale boundary rows sample the page's own edge
+/// color instead of the background (kills the 1px line between pages). Roughly
+/// the width of the observed fractional-scale ghost at typical column widths.
+const TEXTURE_BLEED: u32 = 12;
 
 /// Attempts to extract the canonical chapter/episode number from a comic filename.
 /// Handles formats like:
