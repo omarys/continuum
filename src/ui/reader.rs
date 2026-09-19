@@ -69,6 +69,7 @@ pub struct ReaderView {
     pub focused_page_idx: Rc<RefCell<usize>>,
     pub requested_initial_page: Rc<Cell<usize>>,
     pub zoom: Rc<Cell<f64>>,
+    pub last_zoom_time: Rc<RefCell<Option<std::time::Instant>>>,
 
     // Channels
     pub tx: Sender<(PageKey, usize, Option<DecodedImagePayload>)>,
@@ -139,6 +140,7 @@ impl ReaderView {
         let focused_page_idx = Rc::new(RefCell::new(0));
         let requested_initial_page = Rc::new(Cell::new(0));
         let zoom = Rc::new(Cell::new(1.0));
+        let last_zoom_time = Rc::new(RefCell::new(None));
 
         let (tx, rx) = unbounded::<(PageKey, usize, Option<DecodedImagePayload>)>();
 
@@ -167,6 +169,7 @@ impl ReaderView {
             focused_page_idx,
             requested_initial_page,
             zoom,
+            last_zoom_time,
             tx,
             rx,
         };
@@ -1863,18 +1866,21 @@ impl ReaderView {
         let init_z = initial_zoom.clone();
         let reader_begin = self.clone();
         zoom_gesture.connect_begin(move |_, _| {
+            *reader_begin.last_zoom_time.borrow_mut() = Some(std::time::Instant::now());
             init_z.set(reader_begin.zoom.get());
         });
 
         let init_z2 = initial_zoom;
         let reader_scale = self.clone();
         zoom_gesture.connect_scale_changed(move |_, scale| {
+            *reader_scale.last_zoom_time.borrow_mut() = Some(std::time::Instant::now());
             let target_zoom = (init_z2.get() * scale).clamp(1.0, 3.0);
             reader_scale.set_zoom(target_zoom);
         });
 
         let reader_end = self.clone();
         zoom_gesture.connect_end(move |_, _| {
+            *reader_end.last_zoom_time.borrow_mut() = Some(std::time::Instant::now());
             let cur = reader_end.zoom.get();
             if (cur - 1.0).abs() < 0.05 {
                 reader_end.set_zoom(1.0);
@@ -1882,6 +1888,57 @@ impl ReaderView {
         });
 
         self.scrolled_window.add_controller(zoom_gesture);
+    }
+
+    pub fn is_recently_zooming(&self) -> bool {
+        self.last_zoom_time
+            .borrow()
+            .is_some_and(|t| t.elapsed() < Duration::from_millis(400))
+    }
+
+    pub fn is_point_on_loaded_image(&self, x: f64, y: f64) -> bool {
+        if self.chapters.borrow().is_empty() {
+            return false;
+        }
+        if let Some(picked) = self.scrolled_window.pick(x, y, gtk4::PickFlags::DEFAULT) {
+            if let Some(pic) = picked.downcast_ref::<gtk4::Picture>() {
+                return pic.paintable().is_some() && pic.is_visible();
+            }
+            let mut curr = Some(picked);
+            while let Some(w) = curr {
+                if let Some(pic) = w.downcast_ref::<gtk4::Picture>() {
+                    return pic.paintable().is_some() && pic.is_visible();
+                }
+                if w.has_css_class("page-container") {
+                    let mut child = w.first_child();
+                    while let Some(c) = child {
+                        if let Some(pic) = c.downcast_ref::<gtk4::Picture>() {
+                            if pic.paintable().is_some() && pic.is_visible() {
+                                if let Some(bounds) = pic.compute_bounds(&self.scrolled_window) {
+                                    let px = x as f32;
+                                    let py = y as f32;
+                                    return px >= bounds.x()
+                                        && px <= bounds.x() + bounds.width()
+                                        && py >= bounds.y()
+                                        && py <= bounds.y() + bounds.height();
+                                }
+                                return true;
+                            }
+                        }
+                        child = c.next_sibling();
+                    }
+                    return false;
+                }
+                if w.has_css_class("page-placeholder")
+                    || w.has_css_class("chapter-banner")
+                    || w.is::<libadwaita::StatusPage>()
+                {
+                    return false;
+                }
+                curr = w.parent();
+            }
+        }
+        false
     }
 }
 
@@ -1952,5 +2009,36 @@ mod tests {
         reader.reset_zoom();
         assert_eq!(reader.zoom(), 1.0);
         assert_eq!(reader.clamp.maximum_size(), base_w);
+    }
+
+    #[test]
+    fn test_is_point_on_loaded_image_empty() {
+        let _lock = crate::GTK_TEST_MUTEX.lock();
+        if !gtk4::is_initialized_main_thread() && (gtk4::is_initialized() || gtk4::init().is_err())
+        {
+            return;
+        }
+        let reader = ReaderView::new();
+        // Empty reader has no loaded images
+        assert!(!reader.is_point_on_loaded_image(100.0, 100.0));
+        assert!(!reader.is_point_on_loaded_image(0.0, 0.0));
+    }
+
+    #[test]
+    fn test_recently_zooming_tracking() {
+        let _lock = crate::GTK_TEST_MUTEX.lock();
+        if !gtk4::is_initialized_main_thread() && (gtk4::is_initialized() || gtk4::init().is_err())
+        {
+            return;
+        }
+        let reader = ReaderView::new();
+        assert!(!reader.is_recently_zooming());
+
+        *reader.last_zoom_time.borrow_mut() = Some(std::time::Instant::now());
+        assert!(reader.is_recently_zooming());
+
+        *reader.last_zoom_time.borrow_mut() =
+            Some(std::time::Instant::now() - std::time::Duration::from_millis(500));
+        assert!(!reader.is_recently_zooming());
     }
 }

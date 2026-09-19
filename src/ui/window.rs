@@ -121,9 +121,16 @@ impl ManhwaWindow {
             show_shortcuts_dialog(&win_help);
         });
 
+        let pending_single_tap = Rc::new(RefCell::new(None::<glib::SourceId>));
+
+        let header_bar_notify = header_bar.clone();
+        let pending_for_notify = pending_single_tap.clone();
         window.connect_fullscreened_notify(move |win| {
+            if let Some(source_id) = pending_for_notify.borrow_mut().take() {
+                source_id.remove();
+            }
             let is_fullscreen = win.is_fullscreen();
-            header_bar.set_visible(!is_fullscreen);
+            header_bar_notify.set_visible(!is_fullscreen);
         });
 
         let window_struct = Self { window, reader };
@@ -132,14 +139,18 @@ impl ManhwaWindow {
         // completion) when the window closes, so the spawning process can
         // persist reading progress.
         let reader_rc = window_struct.reader.clone();
+        let pending_for_close = pending_single_tap.clone();
         window_struct.window.connect_close_request(move |_| {
+            if let Some(source_id) = pending_for_close.borrow_mut().take() {
+                source_id.remove();
+            }
             if let Some(payload) = reader_rc.exit_payload() {
                 println!("{}", exit_payload_json(&payload));
             }
             glib::Propagation::Proceed
         });
 
-        window_struct.setup_actions(open_btn);
+        window_struct.setup_actions(open_btn, header_bar, pending_single_tap);
         window_struct
     }
 
@@ -196,7 +207,12 @@ impl ManhwaWindow {
         }
     }
 
-    fn setup_actions(&self, open_btn: gtk4::Button) {
+    fn setup_actions(
+        &self,
+        open_btn: gtk4::Button,
+        header_bar: HeaderBar,
+        pending_single_tap: Rc<RefCell<Option<glib::SourceId>>>,
+    ) {
         let win_clone = self.window.clone();
         let reader_clone = self.reader.clone();
 
@@ -251,6 +267,64 @@ impl ManhwaWindow {
             }
         });
         self.reader.container.add_controller(gesture);
+
+        let reader_tap = self.reader.clone();
+        let win_tap = self.window.clone();
+        let header_bar_tap = header_bar;
+        let reader_click_gesture = gtk4::GestureClick::new();
+
+        let pending_for_released = pending_single_tap;
+        reader_click_gesture.connect_released(move |_gesture, n_press, x, y| {
+            if reader_tap.is_recently_zooming() {
+                return;
+            }
+
+            let is_fullscreen = win_tap.is_fullscreen();
+
+            if is_fullscreen {
+                if n_press == 2 {
+                    if let Some(source_id) = pending_for_released.borrow_mut().take() {
+                        source_id.remove();
+                    }
+                    if reader_tap.is_point_on_loaded_image(x, y) {
+                        win_tap.unfullscreen();
+                        header_bar_tap.set_visible(true);
+                    }
+                } else if n_press == 1 {
+                    if let Some(source_id) = pending_for_released.borrow_mut().take() {
+                        source_id.remove();
+                    }
+
+                    let header_bar_toggle = header_bar_tap.clone();
+                    let pending_ref = pending_for_released.clone();
+                    let timeout_ms = gtk4::Settings::default()
+                        .map(|s| s.gtk_double_click_time().max(0) as u64)
+                        .unwrap_or(250)
+                        .clamp(200, 350);
+
+                    let source_id = glib::timeout_add_local_once(
+                        Duration::from_millis(timeout_ms),
+                        move || {
+                            *pending_ref.borrow_mut() = None;
+                            let currently_visible = header_bar_toggle.is_visible();
+                            header_bar_toggle.set_visible(!currently_visible);
+                        },
+                    );
+                    *pending_for_released.borrow_mut() = Some(source_id);
+                }
+            } else if n_press == 2 {
+                if let Some(source_id) = pending_for_released.borrow_mut().take() {
+                    source_id.remove();
+                }
+                if reader_tap.is_point_on_loaded_image(x, y) {
+                    win_tap.fullscreen();
+                    header_bar_tap.set_visible(false);
+                }
+            }
+        });
+        self.reader
+            .scrolled_window
+            .add_controller(reader_click_gesture);
 
         let key_controller = gtk4::EventControllerKey::new();
         let open_cb3 = open_file_rc;
@@ -683,5 +757,23 @@ mod tests {
     #[test]
     fn escapes_backslash_and_quote_in_paths() {
         assert_eq!(escape_json_string("/a\\b\"c.cbz"), "/a\\\\b\\\"c.cbz");
+    }
+
+    #[test]
+    fn test_window_fullscreen_header_bar_toggle() {
+        let _lock = crate::GTK_TEST_MUTEX.lock();
+        if !gtk4::is_initialized_main_thread() && (gtk4::is_initialized() || gtk4::init().is_err())
+        {
+            return;
+        }
+        let app = libadwaita::Application::builder()
+            .application_id("dev.continuum.test_fullscreen")
+            .build();
+        let manhwa_window = ManhwaWindow::new(&app);
+        manhwa_window.window.present();
+
+        assert!(!manhwa_window.window.is_fullscreen());
+        manhwa_window.window.fullscreen();
+        manhwa_window.window.unfullscreen();
     }
 }

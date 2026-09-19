@@ -297,6 +297,13 @@ mod tests {
 
         let bounds_500 = pw.container.compute_bounds(&reader.clamp).unwrap();
         assert!(bounds_500.height() > 0.0);
+
+        // Test is_point_on_loaded_image on loaded page
+        let pic_bounds = pw.picture.compute_bounds(&reader.scrolled_window).unwrap();
+        let center_x = (pic_bounds.x() + pic_bounds.width() / 2.0) as f64;
+        let center_y = (pic_bounds.y() + pic_bounds.height() / 2.0) as f64;
+        assert!(reader.is_point_on_loaded_image(center_x, center_y));
+        assert!(!reader.is_point_on_loaded_image(-100.0, -100.0));
     }
 
     #[test]
