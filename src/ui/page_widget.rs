@@ -1,4 +1,5 @@
 use crate::cache::PageKey;
+use crate::cbz::padded_aspect_ratio;
 use gdk4::Texture;
 use gtk4::prelude::*;
 use gtk4::{Align, Box as GtkBox, ContentFit, Label, Orientation, Picture, Spinner};
@@ -57,8 +58,7 @@ impl PageWidget {
         container.add_css_class("page-container");
 
         let calc_height = if width > 0 && height > 0 {
-            let aspect = height as f64 / width as f64;
-            ((700.0 * aspect) as i32).max(200)
+            ((700.0 * padded_aspect_ratio(width, height)) as i32).max(200)
         } else {
             1000 // Default height
         };
@@ -184,9 +184,14 @@ impl PageWidget {
     /// beyond native width at 1x, and capped to the 20:9 phone-like column so wide
     /// screens (even fullscreen) zoom the feed out instead of filling the width.
     /// Multiplied by current zoom level.
+    ///
+    /// Uses the bleed-padded aspect ratio, not the raw image aspect: the picture
+    /// renders the padded texture, and reserving height from the raw aspect makes
+    /// `GtkPicture` letterbox it inside this box, exposing the background as a gap
+    /// above and below every page.
     pub fn calc_webtoon_height(&self) -> i32 {
         let (w, h) = self.get_dimensions();
-        let aspect = if w > 0 { h as f64 / w as f64 } else { 1.5 };
+        let aspect = padded_aspect_ratio(w, h);
         let display_w = self.calc_webtoon_base_width() * self.zoom.get();
         ((display_w * aspect).round() as i32).max(50)
     }
@@ -467,11 +472,11 @@ mod tests {
             chapter_idx: 0,
             page_idx: 0,
         };
-        // 1200x1800 strip (aspect 1.5) on a fullscreen 1920x1080 viewport.
+        // 1200x1800 strip (padded aspect 1824/1224) on a fullscreen 1920x1080 viewport.
         let pw = PageWidget::new(key, 0, 10, 1200, 1800);
         pw.update_layout_for_mode(ReadingMode::ContinuousVertical, 1920.0, 1080.0);
         // Column = 1080 * 9/20 = 486, narrower than native 1200.
-        assert_eq!(pw.calc_webtoon_height(), 729);
+        assert_eq!(pw.calc_webtoon_height(), 724);
 
         // Native width smaller than the column wins (never upscale).
         let narrow_key = PageKey {
@@ -480,11 +485,43 @@ mod tests {
         };
         let narrow_pw = PageWidget::new(narrow_key, 1, 10, 400, 800);
         narrow_pw.update_layout_for_mode(ReadingMode::ContinuousVertical, 1920.0, 1080.0);
-        assert_eq!(narrow_pw.calc_webtoon_height(), 800);
+        assert_eq!(narrow_pw.calc_webtoon_height(), 777);
 
         // Viewport narrower than the column wins too.
         pw.update_layout_for_mode(ReadingMode::ContinuousVertical, 300.0, 1080.0);
-        assert_eq!(pw.calc_webtoon_height(), 450);
+        assert_eq!(pw.calc_webtoon_height(), 447);
+    }
+
+    /// Regression: reserving height from the raw image aspect left a
+    /// background-coloured band above and below every page, because `GtkPicture`
+    /// letterboxes the bleed-padded texture inside the box it was given.
+    #[test]
+    fn webtoon_height_matches_padded_texture_aspect() {
+        let _lock = crate::GTK_TEST_MUTEX.lock();
+        if !init_gtk_for_test() {
+            return;
+        }
+
+        let key = PageKey {
+            chapter_idx: 0,
+            page_idx: 0,
+        };
+        // A real page from "Martial Wild West - Chapter 9": 800x9234 strip.
+        let pw = PageWidget::new(key, 0, 25, 800, 9234);
+        pw.update_layout_for_mode(ReadingMode::ContinuousVertical, 1920.0, 1080.0);
+
+        let base_w = 486.0f64; // phone column: 1080 * 9/20
+        let rendered = base_w * ((9234.0 + 24.0) / (800.0 + 24.0));
+        let reserved_by_raw_aspect = base_w * (9234.0 / 800.0);
+
+        assert_eq!(pw.calc_webtoon_height(), rendered.round() as i32);
+        // The old raw-aspect reservation was this much taller than the texture
+        // actually renders, and the difference showed as background between pages.
+        assert!(
+            reserved_by_raw_aspect - rendered > 100.0,
+            "gap this guards against was only {}px",
+            reserved_by_raw_aspect - rendered
+        );
     }
 
     #[test]
@@ -498,28 +535,28 @@ mod tests {
             chapter_idx: 0,
             page_idx: 0,
         };
-        // 1200x1800 page (aspect 1.5)
+        // 1200x1800 page (padded aspect 1824/1224)
         let pw = PageWidget::new(key, 0, 10, 1200, 1800);
 
         // Webtoon mode on 1920x1080 viewport (phone column = 486)
         pw.update_layout_for_mode(ReadingMode::ContinuousVertical, 1920.0, 1080.0);
         assert_eq!(pw.calc_webtoon_width(), 486);
-        assert_eq!(pw.calc_webtoon_height(), 729);
+        assert_eq!(pw.calc_webtoon_height(), 724);
 
         // 1.25x zoom
         pw.zoom.set(1.25);
         assert_eq!(pw.calc_webtoon_width(), (486.0 * 1.25f64).round() as i32); // 608
-        assert_eq!(pw.calc_webtoon_height(), (729.0 * 1.25f64).round() as i32); // 911
+        assert_eq!(pw.calc_webtoon_height(), (724.0 * 1.25f64).round() as i32); // 905
 
         // 1.5x zoom
         pw.zoom.set(1.5);
         assert_eq!(pw.calc_webtoon_width(), (486.0 * 1.5f64).round() as i32); // 729
-        assert_eq!(pw.calc_webtoon_height(), (729.0 * 1.5f64).round() as i32); // 1094
+        assert_eq!(pw.calc_webtoon_height(), (724.0 * 1.5f64).round() as i32); // 1086
 
         // 2.0x zoom
         pw.zoom.set(2.0);
         assert_eq!(pw.calc_webtoon_width(), 486 * 2); // 972
-        assert_eq!(pw.calc_webtoon_height(), 729 * 2); // 1458
+        assert_eq!(pw.calc_webtoon_height(), 724 * 2); // 1448
 
         // Manga mode on 800x900 viewport:
         // Base width for portrait: 900 / 1.5 = 600

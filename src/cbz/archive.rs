@@ -222,19 +222,20 @@ impl CbzArchive {
         Ok((width, height, raw_rgba_bytes))
     }
 
+    /// Pad a decoded page with the texture edge bleed. Runs on the decode
+    /// worker so the GTK main thread only pays for the GPU upload instead of a
+    /// second full-size RGBA allocation plus copy.
+    pub fn pad_page_bytes(width: u32, height: u32, rgba_bytes: &[u8]) -> Vec<u8> {
+        bleed_rgba(width, height, rgba_bytes, TEXTURE_BLEED as usize)
+    }
+
+    /// Builds the uploadable texture from already-padded RGBA (see
+    /// [`Self::pad_page_bytes`]).
     pub fn create_texture(
         width: u32,
         height: u32,
-        rgba_bytes: Vec<u8>,
+        padded_rgba: Vec<u8>,
     ) -> Result<LoadedPageData, String> {
-        let byte_size = (width * height * 4) as usize;
-        if rgba_bytes.len() != byte_size {
-            return Err(format!(
-                "RGBA byte count mismatch: expected {} but got {}",
-                byte_size,
-                rgba_bytes.len()
-            ));
-        }
         // Pad the texture with duplicated edge texels. On fractional device
         // scales (e.g. 1.25) GTK ghosts the boundary rows between adjacent
         // downscaled textures against the page background, showing up as a
@@ -242,11 +243,19 @@ impl CbzArchive {
         // those rows sample the page's own edge color instead. GtkPicture fits
         // the padded texture into the same rect, so visible content is only
         // ~1-2% inset.
+        let byte_size = (width * height * 4) as usize;
         let bleed = TEXTURE_BLEED as usize;
-        let padded = bleed_rgba(width, height, &rgba_bytes, bleed);
         let tex_w = width as usize + 2 * bleed;
         let tex_h = height as usize + 2 * bleed;
-        let bytes = glib::Bytes::from_owned(padded);
+        let padded_size = tex_w * tex_h * 4;
+        if padded_rgba.len() != padded_size {
+            return Err(format!(
+                "Padded RGBA byte count mismatch: expected {} but got {}",
+                padded_size,
+                padded_rgba.len()
+            ));
+        }
+        let bytes = glib::Bytes::from_owned(padded_rgba);
         let pixbuf = gdk_pixbuf::Pixbuf::from_bytes(
             &bytes,
             gdk_pixbuf::Colorspace::Rgb,
@@ -294,6 +303,23 @@ fn bleed_rgba(width: u32, height: u32, src: &[u8], bleed: usize) -> Vec<u8> {
 /// color instead of the background (kills the 1px line between pages). Roughly
 /// the width of the observed fractional-scale ghost at typical column widths.
 const TEXTURE_BLEED: u32 = 12;
+
+/// Aspect ratio (height / width) of the texture [`CbzArchive::create_texture`]
+/// produces. This is *not* the aspect ratio of the source image, because the
+/// bleed border widens and heightens it.
+///
+/// Layout must reserve space with this ratio rather than the raw image aspect.
+/// `GtkPicture` scales the padded texture to fit whatever box it is given and
+/// centres the result, so reserving the raw aspect leaves the page background
+/// showing above and below every page. The band grows with page height: on an
+/// 800x9234 webtoon strip in a 486px column it is ~150px per seam.
+pub fn padded_aspect_ratio(width: u32, height: u32) -> f64 {
+    if width == 0 || height == 0 {
+        return 1.5;
+    }
+    let bleed = 2.0 * TEXTURE_BLEED as f64;
+    (height as f64 + bleed) / (width as f64 + bleed)
+}
 
 /// Attempts to extract the canonical chapter/episode number from a comic filename.
 /// Handles formats like:
@@ -470,6 +496,33 @@ mod tests {
         );
         assert_eq!(extract_chapter_number("Solo_Leveling_Ch01.cbz"), Some(1.0));
         assert_eq!(extract_chapter_number("Random_Book.cbz"), None);
+    }
+
+    /// `create_texture` now takes already-padded bytes, so the pad step is the
+    /// contract both callers depend on: right length, edge texels duplicated.
+    #[test]
+    fn test_pad_page_bytes_duplicates_edge_texels() {
+        let (w, h) = (3u32, 2u32);
+        // Distinct colour per pixel so a wrong border is visible.
+        let src: Vec<u8> = (0..(w * h) as u8).flat_map(|i| [i, 0, 0, 255]).collect();
+
+        let padded = CbzArchive::pad_page_bytes(w, h, &src);
+
+        let bleed = TEXTURE_BLEED as usize;
+        let tex_w = w as usize + 2 * bleed;
+        let tex_h = h as usize + 2 * bleed;
+        assert_eq!(padded.len(), tex_w * tex_h * 4);
+
+        let px = |x: usize, y: usize| -> u8 { padded[(y * tex_w + x) * 4] };
+        // Top-left corner of the bleed is a copy of source pixel (0, 0).
+        assert_eq!(px(0, 0), 0);
+        // Row bleed replicates the left and right edge of each source row.
+        assert_eq!(px(bleed - 1, bleed), 0);
+        assert_eq!(px(bleed + w as usize - 1, bleed), 2);
+        assert_eq!(px(tex_w - 1, bleed), 2);
+        // Vertical bleed replicates the first and last source row.
+        assert_eq!(px(bleed, 0), 0);
+        assert_eq!(px(bleed, tex_h - 1), 3);
     }
 
     #[test]

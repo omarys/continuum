@@ -59,6 +59,12 @@ pub struct ReaderView {
     pub last_loaded_series_idx: Rc<RefCell<usize>>,
     pub next_chapter_id: Rc<RefCell<usize>>,
     pub last_vadj_value: Rc<RefCell<f64>>,
+    /// Last page index found under the viewport center, used as the starting
+    /// point for the outward search instead of rescanning every page.
+    pub last_viewport_idx: Rc<Cell<usize>>,
+    /// Page that currently carries the manga focus classes; `usize::MAX` means
+    /// nothing has been styled yet.
+    pub last_focused_idx: Rc<Cell<usize>>,
     pub in_flight: Rc<RefCell<HashSet<PageKey>>>,
     pub target_y: Rc<RefCell<Option<f64>>>,
     pub target_x: Rc<RefCell<Option<f64>>>,
@@ -130,6 +136,8 @@ impl ReaderView {
         let last_loaded_series_idx = Rc::new(RefCell::new(0));
         let next_chapter_id = Rc::new(RefCell::new(0));
         let last_vadj_value = Rc::new(RefCell::new(0.0));
+        let last_viewport_idx = Rc::new(Cell::new(0));
+        let last_focused_idx = Rc::new(Cell::new(usize::MAX));
         let in_flight = Rc::new(RefCell::new(HashSet::new()));
         let target_y = Rc::new(RefCell::new(None));
         let target_x = Rc::new(RefCell::new(None));
@@ -159,6 +167,8 @@ impl ReaderView {
             last_loaded_series_idx,
             next_chapter_id,
             last_vadj_value,
+            last_viewport_idx,
+            last_focused_idx,
             in_flight,
             target_y,
             target_x,
@@ -242,6 +252,7 @@ impl ReaderView {
         let last_vadj = self.last_vadj_value.clone();
         vadj.set_value(0.0);
         *last_vadj.borrow_mut() = 0.0;
+        self.last_viewport_idx.set(0);
 
         // Force initial lazy load pass starting from Page 1 (global_idx 0)
         self.request_pages_around(0);
@@ -523,6 +534,7 @@ impl ReaderView {
         let idx = (clamped - 1).min(initial_page_count.saturating_sub(1));
 
         *self.focused_page_idx.borrow_mut() = idx;
+        self.last_viewport_idx.set(idx);
         self.request_pages_around(idx);
 
         // If jumping to near or at the end of the initial chapter, also pre-load the next chapter
@@ -584,6 +596,7 @@ impl ReaderView {
                     let target = y.min(max_scroll);
                     vadj.set_value(target);
                     *self.last_vadj_value.borrow_mut() = target;
+                    self.last_viewport_idx.set(idx);
                     self.request_pages_around(idx);
                     true
                 } else {
@@ -611,6 +624,7 @@ impl ReaderView {
                     let target_x =
                         (rect.x() as f64 + w / 2.0 - hadj.page_size() / 2.0).clamp(0.0, max_scroll);
                     hadj.set_value(target_x);
+                    self.last_viewport_idx.set(idx);
                     self.update_focus_styles(idx);
                     self.request_pages_around(idx);
                     true
@@ -621,9 +635,16 @@ impl ReaderView {
         }
     }
 
-    /// Page under the viewport center, computed from real widget bounds
-    /// (exact per-page geometry), unlike the proportional estimate used by
-    /// `get_current_global_page_idx` for decode dispatch.
+    /// Global index of the page under the viewport center, from real widget
+    /// bounds (exact per-page geometry).
+    ///
+    /// Walks outward from the previous hit rather than scanning the whole page
+    /// list. That list spans every chapter appended so far — thousands of pages
+    /// once a series has been read for a while — and this runs on every scroll
+    /// event, so the old full scan with a `compute_bounds` per page was the main
+    /// source of scroll stutter. Distance to the viewport center is unimodal
+    /// along the ordered page list, so the walk stops as soon as a ring of
+    /// neighbours is no closer than the previous ring.
     fn global_page_at_viewport_center(&self) -> usize {
         let global_to_key = self.global_to_key.borrow();
         let total = global_to_key.len();
@@ -631,54 +652,66 @@ impl ReaderView {
             return 0;
         }
         let widgets = self.page_widgets.borrow();
-        match *self.reading_mode.borrow() {
-            ReadingMode::ContinuousVertical => {
-                let vadj = self.scrolled_window.vadjustment();
-                let center = vadj.value() + vadj.page_size() / 2.0;
-                let mut closest = 0usize;
-                let mut best = f64::MAX;
-                for (i, key) in global_to_key.iter().enumerate() {
-                    if let Some(pw) = widgets.get(key) {
-                        if let Some(rect) = pw.container.compute_bounds(&self.clamp) {
-                            let top = rect.y() as f64;
-                            let bottom = top + rect.height() as f64;
-                            if center >= top && center < bottom {
-                                return i;
-                            }
-                            let dist = (center - (top + rect.height() as f64 / 2.0)).abs();
-                            if dist < best {
-                                best = dist;
-                                closest = i;
-                            }
-                        }
-                    }
-                }
-                closest
+        let vertical = *self.reading_mode.borrow() == ReadingMode::ContinuousVertical;
+        let center = if vertical {
+            let vadj = self.scrolled_window.vadjustment();
+            vadj.value() + vadj.page_size() / 2.0
+        } else {
+            let hadj = self.scrolled_window.hadjustment();
+            hadj.value() + hadj.page_size() / 2.0
+        };
+
+        let start = self.last_viewport_idx.get().min(total - 1);
+        let mut closest = start;
+        let mut best = f64::MAX;
+        let mut previous_ring_best = f64::MAX;
+
+        for ring in 0..total {
+            let lower = start.checked_sub(ring);
+            let upper = if ring == 0 {
+                None
+            } else {
+                (start + ring < total).then_some(start + ring)
+            };
+            if lower.is_none() && upper.is_none() {
+                break;
             }
-            ReadingMode::ContinuousHorizontal => {
-                let hadj = self.scrolled_window.hadjustment();
-                let center_x = hadj.value() + hadj.page_size() / 2.0;
-                let mut closest = 0usize;
-                let mut best = f64::MAX;
-                for (i, key) in global_to_key.iter().enumerate() {
-                    if let Some(pw) = widgets.get(key) {
-                        if let Some(rect) = pw.container.compute_bounds(&self.clamp) {
-                            let left = rect.x() as f64;
-                            let right = left + rect.width() as f64;
-                            if center_x >= left && center_x < right {
-                                return i;
-                            }
-                            let dist = (center_x - (left + rect.width() as f64 / 2.0)).abs();
-                            if dist < best {
-                                best = dist;
-                                closest = i;
-                            }
-                        }
-                    }
+
+            let mut ring_best = f64::MAX;
+            for idx in [lower, upper].into_iter().flatten() {
+                let Some(page) = widgets.get(&global_to_key[idx]) else {
+                    continue;
+                };
+                let Some(rect) = page.container.compute_bounds(&self.clamp) else {
+                    continue;
+                };
+                let (leading, trailing) = if vertical {
+                    (rect.y() as f64, rect.y() as f64 + rect.height() as f64)
+                } else {
+                    (rect.x() as f64, rect.x() as f64 + rect.width() as f64)
+                };
+                if center >= leading && center < trailing {
+                    self.last_viewport_idx.set(idx);
+                    return idx;
                 }
-                closest
+                let distance = (center - (leading + trailing) / 2.0).abs();
+                ring_best = ring_best.min(distance);
+                if distance < best {
+                    best = distance;
+                    closest = idx;
+                }
+            }
+
+            if ring > 0 && ring_best.is_finite() && ring_best >= previous_ring_best {
+                break;
+            }
+            if ring_best.is_finite() {
+                previous_ring_best = ring_best;
             }
         }
+
+        self.last_viewport_idx.set(closest);
+        closest
     }
 
     /// dewey integration contract: when a file was loaded, report the current
@@ -892,7 +925,7 @@ impl ReaderView {
             self.content_box.set_margin_end(margin);
         }
         let cur_idx = *self.focused_page_idx.borrow();
-        self.update_focus_styles(cur_idx);
+        self.restyle_all_focus(cur_idx);
     }
 
     pub fn refit_webtoon_layout(&self) {
@@ -942,30 +975,66 @@ impl ReaderView {
                 }
             }
         }
+        self.last_viewport_idx.set(cur_idx);
         self.update_focus_styles(cur_idx);
     }
 
+    /// Applies the manga focus classes. Only the page whose focus changed is
+    /// touched: this runs on every horizontal scroll event, and the page list
+    /// spans every chapter appended so far.
     pub fn update_focus_styles(&self, focused_idx: usize) {
         if *self.reading_mode.borrow() != ReadingMode::ContinuousHorizontal {
+            return;
+        }
+
+        let previous_idx = self.last_focused_idx.get();
+        if previous_idx == focused_idx {
             return;
         }
 
         let global_to_key = self.global_to_key.borrow();
         let widgets = self.page_widgets.borrow();
 
+        if let Some(page) = global_to_key
+            .get(previous_idx)
+            .and_then(|key| widgets.get(key))
+        {
+            page.container.remove_css_class("manga-page-focused");
+            page.container.add_css_class("manga-page-side");
+        }
+        if let Some(page) = global_to_key
+            .get(focused_idx)
+            .and_then(|key| widgets.get(key))
+        {
+            page.container.remove_css_class("manga-page-side");
+            page.container.add_css_class("manga-page-focused");
+        }
+
+        self.last_focused_idx.set(focused_idx);
+    }
+
+    /// Full restyle pass, needed whenever the set of page widgets changes
+    /// (chapter appended, reading mode switched) — something the incremental
+    /// updates above cannot observe.
+    fn restyle_all_focus(&self, focused_idx: usize) {
+        let global_to_key = self.global_to_key.borrow();
+        let widgets = self.page_widgets.borrow();
+
         for (idx, key) in global_to_key.iter().enumerate() {
-            if let Some(pw) = widgets.get(key) {
+            if let Some(page) = widgets.get(key) {
                 if idx == focused_idx {
-                    if !pw.container.has_css_class("manga-page-focused") {
-                        pw.container.remove_css_class("manga-page-side");
-                        pw.container.add_css_class("manga-page-focused");
+                    if !page.container.has_css_class("manga-page-focused") {
+                        page.container.remove_css_class("manga-page-side");
+                        page.container.add_css_class("manga-page-focused");
                     }
-                } else if !pw.container.has_css_class("manga-page-side") {
-                    pw.container.remove_css_class("manga-page-focused");
-                    pw.container.add_css_class("manga-page-side");
+                } else if !page.container.has_css_class("manga-page-side") {
+                    page.container.remove_css_class("manga-page-focused");
+                    page.container.add_css_class("manga-page-side");
                 }
             }
         }
+
+        self.last_focused_idx.set(focused_idx);
     }
 
     pub fn toggle_reading_mode(&self) {
@@ -1016,6 +1085,9 @@ impl ReaderView {
                         viewport_h,
                     );
                 }
+                // Classes were just stripped from every page; force the next
+                // focus update to restyle from scratch.
+                self.last_focused_idx.set(usize::MAX);
             }
             ReadingMode::ContinuousHorizontal => {
                 self.content_box.set_orientation(Orientation::Horizontal);
@@ -1057,6 +1129,7 @@ impl ReaderView {
         }
 
         *self.focused_page_idx.borrow_mut() = global_idx;
+        self.last_viewport_idx.set(global_idx);
 
         let key = &global_to_key[global_idx];
         let page_widgets = self.page_widgets.borrow();
@@ -1412,8 +1485,15 @@ impl ReaderView {
         let generation_id_rx = self.generation_id.clone();
 
         glib::timeout_add_local(Duration::from_millis(16), move || {
-            let mut uploads_this_tick = 0;
-            const MAX_UPLOADS_PER_TICK: usize = 3;
+            // Keep one frame's worth of upload work bounded. The upload loop
+            // used to run three pages back to back, and each one is a multi-MB
+            // memcpy plus GPU upload on the main thread — that is where the
+            // scroll stutter came from. Bytes are the real cost, so budget them
+            // rather than counting pages.
+            const MAX_UPLOADS_PER_TICK: usize = 4;
+            const MAX_UPLOAD_BYTES_PER_TICK: usize = 12 * 1024 * 1024;
+            let mut uploads_this_tick = 0usize;
+            let mut bytes_this_tick = 0usize;
 
             while let Ok((key, gen, maybe_payload)) = rx.try_recv() {
                 in_flight_rx.borrow_mut().remove(&key);
@@ -1434,17 +1514,16 @@ impl ReaderView {
                                 pw.set_loaded(&data.texture, data.width, data.height);
 
                                 let g2k_map = global_to_key_rx.borrow();
-                                let page_to_global =
-                                    |k: &PageKey| g2k_map.iter().position(|x| x == k).unwrap_or(0);
 
                                 // Compute live viewport global index right now accurately for reading mode
                                 let live_global_idx = reader_c.get_current_global_page_idx();
 
+                                bytes_this_tick += data.byte_size;
                                 let evicted = memory_manager_rx.borrow_mut().insert(
                                     key.clone(),
                                     data,
                                     live_global_idx,
-                                    &page_to_global,
+                                    g2k_map.as_slice(),
                                 );
 
                                 for ev_key in evicted {
@@ -1466,7 +1545,9 @@ impl ReaderView {
                 }
 
                 uploads_this_tick += 1;
-                if uploads_this_tick >= MAX_UPLOADS_PER_TICK {
+                if uploads_this_tick >= MAX_UPLOADS_PER_TICK
+                    || bytes_this_tick >= MAX_UPLOAD_BYTES_PER_TICK
+                {
                     break;
                 }
             }
@@ -1638,24 +1719,20 @@ impl ReaderView {
                     rayon::spawn(move || {
                         let res = (|| -> Result<(u32, u32, Vec<u8>), String> {
                             let buf = CbzArchive::extract_entry_bytes(&archive_data, &entry_name)?;
-                            CbzArchive::decode_page_bytes(&buf)
+                            let (width, height, rgba_bytes) = CbzArchive::decode_page_bytes(&buf)?;
+                            // Edge bleed is pure byte work: do it here rather than
+                            // on the GTK main thread, where it cost a full-size
+                            // allocation and copy per page mid-scroll.
+                            let padded = CbzArchive::pad_page_bytes(width, height, &rgba_bytes);
+                            Ok((width, height, padded))
                         })();
 
                         let payload = match res {
-                            Ok((width, height, rgba_bytes)) => {
-                                eprintln!(
-                                    "[decode] {:?} ok: {}x{} ({} bytes)",
-                                    key_c,
-                                    width,
-                                    height,
-                                    rgba_bytes.len()
-                                );
-                                Some(DecodedImagePayload {
-                                    width,
-                                    height,
-                                    rgba_bytes,
-                                })
-                            }
+                            Ok((width, height, rgba_bytes)) => Some(DecodedImagePayload {
+                                width,
+                                height,
+                                rgba_bytes,
+                            }),
                             Err(e) => {
                                 eprintln!("[ERROR] Failed to decode {:?}: {}", key_c, e);
                                 None
@@ -1696,6 +1773,10 @@ impl ReaderView {
         *self.target_y.borrow_mut() = None;
         *self.target_x.borrow_mut() = None;
         *self.focused_page_idx.borrow_mut() = 0;
+        // The page list is gone, so the incremental focus/viewport cursors must
+        // not be carried into the next comic.
+        self.last_viewport_idx.set(0);
+        self.last_focused_idx.set(usize::MAX);
         self.requested_initial_page.set(0);
         *self.is_animating.borrow_mut() = false;
 
@@ -1818,6 +1899,7 @@ impl ReaderView {
                         (target_center_y - vadj.page_size() / 2.0).clamp(0.0, max_scroll);
                     vadj.set_value(target_vadj);
                     *self.last_vadj_value.borrow_mut() = target_vadj;
+                    self.last_viewport_idx.set(idx);
                     return true;
                 }
             }
