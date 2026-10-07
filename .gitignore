@@ -2,3 +2,6 @@
 /sample_comics
 *.cbz
 *.zip
+
+# openlore analysis artifacts
+.openlore/

@@ -1,0 +1,14 @@
+schema: spec-driven
+openlore:
+  version: 1.2.0
+  generatedAt: 2026-10-07T19:44:22.523Z
+  domains:
+    - cache
+    - cbz
+    - ui
+  confidence: 0.9
+context: |-
+  # Auto-detected by openlore
+  Tech stack: Rust
+  Architecture: Monolithic
+  Domains: agents, cache, cbz, ui

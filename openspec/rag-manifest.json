@@ -1,0 +1,42 @@
+{
+  "generatedAt": "2026-10-07T19:44:22.533Z",
+  "specVersion": "1.0.0",
+  "domains": [
+    {
+      "domain": "cache",
+      "specPath": "openspec/specs/cache/spec.md",
+      "sourceFiles": [
+        "/home/omary/Dev/continuum/src/cache/memory_manager.rs",
+        "/home/omary/Dev/continuum/src/cache/mod.rs"
+      ],
+      "requirementCount": 2,
+      "dependsOn": [],
+      "calledBy": []
+    },
+    {
+      "domain": "cbz",
+      "specPath": "openspec/specs/cbz/spec.md",
+      "sourceFiles": [
+        "/home/omary/Dev/continuum/src/cbz/archive.rs",
+        "/home/omary/Dev/continuum/src/cbz/mod.rs"
+      ],
+      "requirementCount": 7,
+      "dependsOn": [],
+      "calledBy": []
+    },
+    {
+      "domain": "ui",
+      "specPath": "openspec/specs/ui/spec.md",
+      "sourceFiles": [
+        "/home/omary/Dev/continuum/src/ui/chapter_banner.rs",
+        "/home/omary/Dev/continuum/src/ui/mod.rs",
+        "/home/omary/Dev/continuum/src/ui/page_widget.rs",
+        "/home/omary/Dev/continuum/src/ui/reader.rs",
+        "/home/omary/Dev/continuum/src/ui/window.rs"
+      ],
+      "requirementCount": 33,
+      "dependsOn": [],
+      "calledBy": []
+    }
+  ]
+}
