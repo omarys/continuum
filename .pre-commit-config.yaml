@@ -15,7 +15,7 @@ repos:
       - id: mixed-line-ending
         args: [--fix=lf]
   - repo: https://github.com/trufflesecurity/trufflehog
-    rev: v3.95.9
+    rev: v3.100.1
     hooks:
       - id: trufflehog
   - repo: https://github.com/doublify/pre-commit-rust
@@ -25,7 +25,7 @@ repos:
       - id: cargo-check
       - id: clippy
   - repo: https://github.com/shellcheck-py/shellcheck-py
-    rev: v0.11.0.1
+    rev: v0.11.0.1-1
     hooks:
       - id: shellcheck
         entry: shellcheck
